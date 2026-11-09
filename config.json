@@ -1,0 +1,61 @@
+{
+  "port": "COM6",
+  "baudrate": 115200,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1.0,
+  "flow_control": "Ninguno",
+  "initialize_at_on_connect": false,
+  "autoscroll": true,
+  "display_format": "ASCII",
+  "show_special_characters_and_size": false,
+  "command_timeout_seconds": 10,
+  "command_error_policy": "Preguntar",
+  "monitor_interval": "30 segundos",
+  "signal_quality_thresholds": {
+    "NB-IoT": {
+      "rsrp": [
+        -85.0,
+        -95.0,
+        -110.0
+      ],
+      "rsrq": [
+        -8.0,
+        -11.0,
+        -15.0
+      ],
+      "sinr": [
+        20.0,
+        13.0,
+        0.0
+      ]
+    },
+    "LTE-M": {
+      "rsrp": [
+        -85.0,
+        -95.0,
+        -110.0
+      ],
+      "rsrq": [
+        -8.0,
+        -11.0,
+        -15.0
+      ],
+      "sinr": [
+        20.0,
+        13.0,
+        0.0
+      ]
+    }
+  },
+  "iot_host": "udp.os.1nce.com",
+  "iot_port": 4445,
+  "iot_apn": "iot.1nce.net",
+  "iot_context_id": 0,
+  "iot_socket_id": 0,
+  "iot_payload_format": "JSON",
+  "iot_read_length": 1460,
+  "iot_prompt_timeout_ms": 10000,
+  "iot_input_time_ms": 5000,
+  "iot_response_timeout_ms": 30000
+}
