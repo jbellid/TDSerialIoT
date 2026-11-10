@@ -3,13 +3,16 @@ import json
 import os
 
 import pytest
+from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
 import tdserial_iot.main_window as main_window_module
+import tdserial_iot.onence_historian as onence_historian_module
 from tdserial_iot.app_config import DEFAULT_CONFIG
 from tdserial_iot.command_queue import AtCommand, InteractionPlan
 from tdserial_iot.main import configure_qt_plugin_paths
 from tdserial_iot.main_window import MainWindow
+from tdserial_iot.onence_api import AccessToken
 
 
 @pytest.fixture(scope="module")
@@ -31,6 +34,15 @@ def test_display_checkbox_redraws_existing_records(qt_app, monkeypatch):
     )
     window = MainWindow()
     try:
+        connection_layout = window.initialize_at_check.parentWidget().layout()
+        initialize_position = connection_layout.getItemPosition(
+            connection_layout.indexOf(window.initialize_at_check)
+        )
+        connect_position = connection_layout.getItemPosition(
+            connection_layout.indexOf(window.connect_button)
+        )
+        assert initialize_position[0] == connect_position[0]
+        assert initialize_position[1] < connect_position[1]
         assert window.autoscroll_check.objectName() == "toolbarCheck"
         assert window.show_details_check.objectName() == "toolbarCheck"
         assert "QCheckBox#toolbarCheck" in window.styleSheet()
@@ -123,6 +135,7 @@ def test_diagnostic_tab_uses_shared_queue_and_updates_sim_card(qt_app, monkeypat
     monkeypatch.setattr(window, "_write_queued_command", sent.append)
     try:
         assert window.tabs.tabText(1) == "Diagnóstico IoT"
+        assert window.tabs.tabText(3) == "1NCE Cloud"
         window._on_connection_changed(True)
         window._start_diagnostic(("sim",))
         assert sent == [b"AT+CPIN?\r"]
@@ -211,6 +224,314 @@ def test_cancelled_automatic_round_does_not_update_timestamp(qt_app, monkeypatch
         window._process_rx_line(b"OK\r\n")
 
         assert window._last_diagnostic_at is previous_timestamp
+    finally:
+        window.close()
+
+
+def test_onence_authentication_runs_without_serial_connection(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(main_window_module, "load_api_credentials", lambda: None)
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken(
+            "test-token", "Bearer", 3600
+        ),
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        assert not window._is_connected
+        window._test_onence_connection()
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit() if window.onence_test_button.isEnabled() else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert window.onence_test_button.isEnabled()
+        assert window.onence_auth_status_label.text() == (
+            "Autenticación correcta; token disponible."
+        )
+        assert not window._is_connected
+    finally:
+        window.close()
+
+
+def test_onence_history_query_runs_without_com_and_shows_full_iccid(
+    qt_app, monkeypatch
+):
+    assert qt_app is QApplication.instance()
+    token_refreshes = []
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(main_window_module, "load_api_credentials", lambda: None)
+
+    def get_test_token(self, *, force_refresh=False):
+        token_refreshes.append(force_refresh)
+        return AccessToken("test-token", "Bearer", 3600)
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        get_test_token,
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "deviceId": "001234567890",
+                            "iccid": "001234567890",
+                            "time": "2026-11-09T19:39:00Z",
+                            "protocol": "UDP",
+                            "payload": '{"temp":21.3}',
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        onence_historian_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(),
+    )
+    window = MainWindow()
+    try:
+        window._is_connected = False
+        window.onence_iccid_edit.setText("001234567890")
+        window.onence_device_mode_combo.setCurrentText("ICCID manual")
+        window.onence_range_combo.setCurrentText("Últimos mensajes")
+        window._onence_authenticator = main_window_module.OneNCEAuthenticator(
+            main_window_module.ApiCredentials("test-client", "test-secret")
+        )
+        window._start_onence_history_query()
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit()
+            if window.onence_query_button.isEnabled()
+            else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert window.onence_query_button.isEnabled()
+        assert window.onence_history_table.rowCount() == 1
+        assert window.onence_history_table.item(0, 2).text() == "001234567890"
+        assert window.onence_history_table.item(0, 4).text() == '{"temp":21.3}'
+        assert (
+            window.onence_history_table.horizontalHeaderItem(8).text() == "temp"
+        )
+        assert window.onence_history_table.item(0, 8).text() == "21.3"
+        assert window.onence_history_table.columnWidth(2) >= 190
+        assert window.onence_history_table.columnWidth(8) >= 100
+        assert window.onence_history_table.minimumHeight() >= 145
+        assert (
+            window.onence_history_table.horizontalHeader().defaultAlignment()
+            == Qt.AlignmentFlag.AlignCenter
+        )
+        assert all(
+            window.onence_history_table.item(0, column).textAlignment()
+            == Qt.AlignmentFlag.AlignCenter
+            for column in range(window.onence_history_table.columnCount())
+        )
+        window.onence_history_table.setCurrentCell(0, 0)
+        window.onence_payload_view_combo.setCurrentText("JSON")
+        assert '"temp": 21.3' in window.onence_message_detail.toPlainText()
+        assert "ICCID: 001234567890" in window.onence_message_detail.toPlainText()
+        assert token_refreshes[0] is True
+        assert not window._is_connected
+    finally:
+        window.close()
+
+
+def test_onence_last_seven_days_preset_uses_fresh_safe_range(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    requests = []
+
+    def get_history_page(self, device_id, **kwargs):
+        requests.append((device_id, kwargs))
+        return main_window_module.HistoryPage((), None)
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient,
+        "get_history_page",
+        get_history_page,
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        window.onence_iccid_edit.setText("0012345678901234567")
+        window.onence_device_mode_combo.setCurrentText("ICCID manual")
+        window.onence_range_combo.setCurrentText("Últimos 7 días")
+        window._start_onence_history_query()
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit()
+            if window.onence_query_button.isEnabled() and requests
+            else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert requests
+        device_id, query = requests[0]
+        assert device_id == "0012345678901234567"
+        assert query["start_datetime"] is not None
+        assert query["end_datetime"] is not None
+        query_span = (
+            query["end_datetime"] - query["start_datetime"]
+        ).total_seconds()
+        assert 6 * 24 * 60 * 60 < query_span < 7 * 24 * 60 * 60
+        assert "supera la retención" not in window.onence_history_status_label.text()
+    finally:
+        window.close()
+
+
+def test_onence_all_devices_query_does_not_require_manual_iccid(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    requests = []
+
+    def get_all_history_page(self, **kwargs):
+        requests.append(kwargs)
+        return main_window_module.HistoryPage((), None)
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient,
+        "get_all_history_page",
+        get_all_history_page,
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        window.onence_iccid_edit.clear()
+        window.onence_range_combo.setCurrentText("Últimos mensajes")
+        assert window.onence_device_mode_combo.currentText() == "Todos los dispositivos"
+        window._start_onence_history_query()
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit()
+            if window.onence_query_button.isEnabled() and requests
+            else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert requests
+        assert requests[0]["protocol"] == "UDP"
+        assert window.onence_history_table.rowCount() == 0
+        assert "no hay mensajes" in window.onence_history_status_label.text().lower()
+    finally:
+        window.close()
+
+
+def test_onence_device_selector_keeps_duplicate_labels_and_iccid_fallback(
+    qt_app, monkeypatch
+):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    window = MainWindow()
+    try:
+        devices = (
+            main_window_module.OneNCEDevice("iccid-1", "Equipo"),
+            main_window_module.OneNCEDevice("iccid-2", "Equipo"),
+            main_window_module.OneNCEDevice("iccid-3"),
+        )
+        window._on_onence_devices_completed(True, devices, "")
+        window.onence_device_mode_combo.setCurrentText("Seleccionar dispositivo")
+
+        assert window.onence_device_combo.count() == 3
+        assert window.onence_device_combo.itemText(0) == "Equipo — iccid-1"
+        assert window.onence_device_combo.itemText(1) == "Equipo — iccid-2"
+        assert window.onence_device_combo.itemData(0) == "iccid-1"
+        assert window.onence_device_combo.itemData(1) == "iccid-2"
+        assert window.onence_device_combo.itemText(2) == "iccid-3"
+
+        window._cloud_messages = [
+            onence_historian_module.parse_cloud_message(
+                {
+                    "iccid": "iccid-1",
+                    "time": "2026-11-09T19:39:00Z",
+                    "protocol": "UDP",
+                    "payload": '{"temp":21}',
+                }
+            ),
+            onence_historian_module.parse_cloud_message(
+                {
+                    "iccid": "iccid-3",
+                    "time": "2026-11-09T19:40:00Z",
+                    "protocol": "UDP",
+                    "payload": "plain",
+                }
+            ),
+        ]
+        window._render_onence_history_table()
+        headers = [
+            window.onence_history_table.horizontalHeaderItem(index).text()
+            for index in range(7)
+        ]
+        assert headers == [
+            "Fecha y hora",
+            "LABEL",
+            "ICCID",
+            "Protocolo",
+            "Contenido",
+            "Tamaño",
+            "Estado de decodificación",
+        ]
+        assert window.onence_history_table.item(0, 1).text() == "Equipo"
+        assert window.onence_history_table.item(0, 2).text() == "iccid-1"
+        assert window.onence_history_table.item(1, 1).text() == "iccid-3"
+        assert window.onence_history_table.item(0, 6).text().startswith("JSON válido")
     finally:
         window.close()
 
