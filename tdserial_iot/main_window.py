@@ -358,7 +358,6 @@ class MainWindow(QMainWindow):
         self._diagnostic_values: dict[str, str] = {}
         self._diagnostic_field_titles: dict[str, str] = {}
         self._last_diagnostic_at: datetime | None = None
-        self._show_identifiers = False
         self._iot_flow_action: str | None = None
         self._iot_flow_started_at: datetime | None = None
         self._iot_flow_responses: dict[str, list[bytes]] = {}
@@ -385,6 +384,7 @@ class MainWindow(QMainWindow):
         self._cloud_next_token: str | None = None
         self._cloud_query_filters: dict[str, Any] | None = None
         self._cloud_query_started_at: datetime | None = None
+        self._cloud_query_append = False
         self._cloud_history_complete = False
         self._cloud_auto_timer = QTimer(self)
         self._cloud_auto_timer.setSingleShot(True)
@@ -426,6 +426,7 @@ class MainWindow(QMainWindow):
         self.command_input.setEnabled(False)
         self.send_button.setEnabled(False)
         self.terminator_combo.setEnabled(False)
+        self.direct_send_check.setEnabled(False)
         self.echo_check.setEnabled(False)
         self._update_queue_controls()
         self.refresh_ports()
@@ -580,6 +581,7 @@ class MainWindow(QMainWindow):
             lambda: self._start_onence_history_query(fetch_all=True)
         )
         self.onence_auto_check = QCheckBox("Actualización automática")
+        self.onence_auto_check.setObjectName("toolbarCheck")
         self.onence_auto_check.toggled.connect(self._toggle_onence_auto_update)
         self.onence_auto_interval_combo = self._combo(
             ["Manual", "30 segundos", "60 segundos", "5 minutos"], "Manual"
@@ -820,7 +822,13 @@ class MainWindow(QMainWindow):
         self._start_diagnostic(("iccid",))
 
     def _query_onence_history(self) -> None:
+        if not self.onence_auto_check.isChecked():
+            return
         self._start_onence_history_query()
+        if self._onence_history_thread is None and not self._cloud_auto_timer.isActive():
+            delay_ms = self._onence_auto_delay_ms()
+            if delay_ms is not None:
+                self._cloud_auto_timer.start(delay_ms)
 
     def _onence_device_mode_changed(self, mode: str) -> None:
         mode_index = {
@@ -977,14 +985,16 @@ class MainWindow(QMainWindow):
             query_filters = self._cloud_query_filters
         else:
             start_datetime: datetime | None = None
-            end_datetime: datetime | None = None
-            if self.onence_range_combo.currentText() != "Últimos mensajes":
-                if self.onence_range_combo.currentText() == "Últimos 7 días":
-                    preset_end = QDateTime.currentDateTime()
-                    self.onence_end_datetime.setDateTime(preset_end)
+            preset = self.onence_range_combo.currentText()
+            if preset != "Personalizado":
+                preset_end = QDateTime.currentDateTime()
+                self.onence_end_datetime.setDateTime(preset_end)
+                if preset == "Últimos 7 días":
                     self.onence_start_datetime.setDateTime(
                         preset_end.addDays(-HISTORIAN_RETENTION_DAYS).addSecs(60)
                     )
+            end_datetime: datetime | None = None
+            if preset != "Últimos mensajes":
                 start_datetime = self._local_datetime(self.onence_start_datetime)
                 end_datetime = self._local_datetime(self.onence_end_datetime)
                 now = datetime.now().astimezone()
@@ -1042,11 +1052,7 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.completed.connect(
-            lambda success, page, message, append=load_more: self._on_onence_history_completed(
-                success, page, message, append=append
-            )
-        )
+        worker.completed.connect(self._on_onence_history_completed)
         worker.completed.connect(thread.quit)
         worker.completed.connect(worker.deleteLater)
         thread.finished.connect(
@@ -1055,7 +1061,12 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._onence_history_thread = thread
         self._onence_history_worker = worker
+        self._cloud_query_append = load_more
         self._cloud_query_started_at = datetime.now().astimezone()
+        self.onence_last_query_label.setText(
+            "Última consulta: "
+            + self._cloud_query_started_at.strftime("%d/%m/%Y %H:%M:%S")
+        )
         self.onence_query_button.setEnabled(False)
         self.onence_more_button.setEnabled(False)
         self.onence_all_button.setEnabled(False)
@@ -1068,9 +1079,9 @@ class MainWindow(QMainWindow):
         success: bool,
         page: object,
         message: str,
-        *,
-        append: bool = False,
     ) -> None:
+        append = self._cloud_query_append
+        self._cloud_query_append = False
         self.onence_query_button.setEnabled(True)
         self.onence_more_button.setEnabled(True)
         self.onence_all_button.setEnabled(True)
@@ -1660,11 +1671,6 @@ class MainWindow(QMainWindow):
             layout.addWidget(title_label, row, 0)
             layout.addWidget(value, row, 1)
         action_row = len(rows)
-        if title == "Identificación":
-            self.reveal_identifiers_check = QCheckBox("Mostrar identificadores completos")
-            self.reveal_identifiers_check.toggled.connect(self._set_identifiers_visible)
-            layout.addWidget(self.reveal_identifiers_check, action_row, 0, 1, 2)
-            action_row += 1
         button_text = {
             "Identificación": "Actualizar identificación",
             "Estado de la SIM": "Consultar SIM",
@@ -2644,7 +2650,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_command_panel(self) -> QGroupBox:
-        group = QGroupBox("Envío de comandos AT")
+        group = QGroupBox("Envío AT / texto directo")
         layout = QGridLayout(group)
         self.command_input = CommandTextEdit()
         self.command_input.setPlaceholderText(
@@ -2656,6 +2662,13 @@ class MainWindow(QMainWindow):
         self.terminator_combo.currentTextChanged.connect(self._update_byte_count)
         self.command_input.textChanged.connect(self._update_byte_count)
         self.command_input.textChanged.connect(self._adjust_command_input_height)
+        self.direct_send_check = QCheckBox("Enviar texto/caracteres sin terminación")
+        self.direct_send_check.setObjectName("toolbarCheck")
+        self.direct_send_check.setToolTip(
+            "Envía exactamente los bytes UTF-8 escritos, sin añadir CR/LF ni "
+            "esperar una respuesta AT terminal."
+        )
+        self.direct_send_check.toggled.connect(self._update_direct_send_mode)
         self.send_button = QPushButton("Enviar")
         self.send_button.setObjectName("primaryButton")
         self.send_button.clicked.connect(self._send_command)
@@ -2703,7 +2716,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.terminator_combo, 0, 8)
         layout.addWidget(self.byte_count_label, 0, 9)
         layout.addWidget(self.send_button, 0, 10)
-        layout.addWidget(self.sequence_controls_widget, 1, 0, 1, 11)
+        layout.addWidget(self.direct_send_check, 1, 0, 1, 3)
+        layout.addWidget(self.sequence_controls_widget, 2, 0, 1, 11)
         self.command_input.textChanged.connect(self._update_queue_controls)
         return group
 
@@ -2891,7 +2905,11 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(
             connected and not self._command_queue.paused and not self._initializing_at
         )
-        self.terminator_combo.setEnabled(connected)
+        self.direct_send_check.setEnabled(connected and not self._initializing_at)
+        self.terminator_combo.setEnabled(
+            connected
+            and not self.direct_send_check.isChecked()
+        )
         self.connect_button.setEnabled(True)
         self.connect_button.setText("Desconectar" if connected else "Conectar")
         self.initialize_at_check.setEnabled(not connected)
@@ -3070,6 +3088,21 @@ class MainWindow(QMainWindow):
             self._on_error("Espera a que termine la operación de Comunicaciones IoT.")
             return
         text = self.command_input.toPlainText()
+        if self.direct_send_check.isChecked():
+            if not text:
+                return
+            if not self._is_connected:
+                self._on_error("No hay ningún puerto serie conectado.")
+                return
+            if self._command_queue.is_busy or self._command_queue.paused:
+                self._on_error(
+                    "El envío directo no puede intercalarse con una secuencia AT activa."
+                )
+                return
+            payload = text.encode("utf-8")
+            self.write_requested.emit(payload)
+            self.command_input.clear()
+            return
         commands = [line.strip() for line in text.splitlines() if line.strip()]
         if not commands:
             return
@@ -3097,6 +3130,12 @@ class MainWindow(QMainWindow):
         self.command_input.clear()
 
     def _update_byte_count(self) -> None:
+        if self.direct_send_check.isChecked():
+            data = self.command_input.toPlainText().encode("utf-8")
+            self.byte_count_label.setText(
+                f"{len(data)} byte(s) · envío directo"
+            )
+            return
         try:
             commands = encode_at_commands(
                 self.command_input.toPlainText(),
@@ -3107,6 +3146,11 @@ class MainWindow(QMainWindow):
             return
         total_bytes = sum(len(command) for command in commands)
         self.byte_count_label.setText(f"{total_bytes} bytes · {len(commands)} comando(s)")
+
+    def _update_direct_send_mode(self, enabled: bool) -> None:
+        self.terminator_combo.setEnabled(self._is_connected and not enabled)
+        self._update_byte_count()
+        self._update_queue_controls()
 
     def _write_queued_command(self, command: bytes) -> None:
         active = self._command_queue.active_spec
@@ -3324,7 +3368,11 @@ class MainWindow(QMainWindow):
         )
         self.cancel_queue_button.setEnabled(
             self._is_connected
-            and (self._command_queue.active_spec is not None or self._command_queue.pending_count > 0)
+            and (
+                self._command_queue.paused
+                or self._command_queue.active_spec is not None
+                or self._command_queue.pending_count > 0
+            )
             and not self._command_queue.cancel_requested
         )
         operation_idle = self._iot_flow_action is None
@@ -3332,8 +3380,18 @@ class MainWindow(QMainWindow):
             self._is_connected and operation_idle and not self._initializing_at
         )
         self.command_input.setEnabled(input_available)
+        self.direct_send_check.setEnabled(input_available)
+        self.terminator_combo.setEnabled(
+            input_available and not self.direct_send_check.isChecked()
+        )
         self.send_button.setEnabled(
-            input_available and not self._command_queue.paused
+            input_available
+            and (
+                not self._command_queue.paused
+                if not self.direct_send_check.isChecked()
+                else not self._command_queue.is_busy
+                and not self._command_queue.paused
+            )
         )
         self.echo_check.setEnabled(
             input_available and not self._command_queue.paused
@@ -3342,7 +3400,7 @@ class MainWindow(QMainWindow):
             has_entered_sequence
             or self._manual_sequence_active
             or self._diagnostic_manual_remaining > 1
-            or (self._command_queue.paused and self._command_queue.total_count > 1)
+            or self._command_queue.paused
         )
 
     def _set_modem_echo(self, enabled: bool) -> None:
@@ -3408,10 +3466,6 @@ class MainWindow(QMainWindow):
             self._write_queued_command(first_command.data)
         self._update_queue_controls()
 
-    def _set_identifiers_visible(self, visible: bool) -> None:
-        self._show_identifiers = visible
-        self._render_identity_fields()
-
     def _diagnostic_report_values(self) -> dict[str, str]:
         timestamp = (
             self._last_diagnostic_at.strftime("%d/%m/%Y %H:%M:%S")
@@ -3421,7 +3475,7 @@ class MainWindow(QMainWindow):
         values = {"Fecha y hora": timestamp}
         for key, title in self._diagnostic_field_titles.items():
             value = self._diagnostic_values.get(key, "N/D")
-            values[title] = self._display_identifier(key, value)
+            values[title] = value
 
         extra_fields = (
             ("modem_info", "Información ATI"),
@@ -3603,18 +3657,9 @@ class MainWindow(QMainWindow):
         label = self._diagnostic_fields.get(key)
         if label is None:
             return
-        text = self._display_identifier(key, value)
         color = self._diagnostic_color(key, value)
-        label.setText(f"● {text}")
+        label.setText(f"● {value}")
         label.setStyleSheet(f"color: {color};")
-
-    def _display_identifier(self, key: str, value: str) -> str:
-        if key not in {"imei", "iccid", "imsi"} or self._show_identifiers:
-            return value
-        digits = "".join(character for character in value if character.isdigit())
-        if value == "N/D" or len(digits) < 5:
-            return value
-        return f"{'*' * (len(digits) - 4)}{digits[-4:]}"
 
     @staticmethod
     def _diagnostic_color(key: str, value: str) -> str:
