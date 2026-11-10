@@ -45,6 +45,7 @@ def test_display_checkbox_redraws_existing_records(qt_app, monkeypatch):
         assert initialize_position[1] < connect_position[1]
         assert window.autoscroll_check.objectName() == "toolbarCheck"
         assert window.show_details_check.objectName() == "toolbarCheck"
+        assert window.onence_auto_check.objectName() == "toolbarCheck"
         assert "QCheckBox#toolbarCheck" in window.styleSheet()
         assert "QTabBar::tab {" in window.styleSheet()
         assert "QTabBar::tab:selected" in window.styleSheet()
@@ -122,6 +123,33 @@ def test_sequence_controls_show_only_for_multiline_sequence(qt_app, monkeypatch)
         assert not window.sequence_controls_widget.isHidden()
         window._process_rx_line(b"OK\r\n")
         assert window.sequence_controls_widget.isHidden()
+    finally:
+        window.close()
+
+
+def test_single_command_timeout_shows_resume_and_cancel_controls(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    window = MainWindow()
+    monkeypatch.setattr(window, "_write_queued_command", lambda command: None)
+    try:
+        window._is_connected = True
+        window.command_input.setPlainText("!")
+        window._send_command()
+        window._command_timeout_timer.stop()
+
+        window._on_command_timeout()
+
+        assert window._command_queue.paused
+        assert not window.sequence_controls_widget.isHidden()
+        assert window.resume_queue_button.isEnabled()
+        assert window.cancel_queue_button.isEnabled()
+
+        window._cancel_command_queue()
+        assert not window._command_queue.paused
+        assert window.sequence_controls_widget.isHidden()
+        assert window.send_button.isEnabled()
     finally:
         window.close()
 
@@ -423,6 +451,89 @@ def test_onence_last_seven_days_preset_uses_fresh_safe_range(qt_app, monkeypatch
         window.close()
 
 
+@pytest.mark.parametrize(
+    "period",
+    [
+        "Últimos mensajes",
+        "Última hora",
+        "Últimas 24 horas",
+        "Últimos 7 días",
+        "Personalizado",
+    ],
+)
+def test_onence_history_refreshes_until_at_query_time_except_custom(
+    qt_app, monkeypatch, period
+):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    requests = []
+
+    def get_history_page(self, device_id, **kwargs):
+        requests.append(kwargs)
+        return main_window_module.HistoryPage((), None)
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient,
+        "get_history_page",
+        get_history_page,
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        window.onence_iccid_edit.setText("0012345678901234567")
+        window.onence_device_mode_combo.setCurrentText("ICCID manual")
+        window.onence_range_combo.setCurrentText(period)
+        window.onence_end_datetime.setDateTime(
+            window.onence_end_datetime.dateTime().addSecs(-300)
+        )
+        if period == "Personalizado":
+            window.onence_start_datetime.setDateTime(
+                window.onence_end_datetime.dateTime().addSecs(-3600)
+            )
+        custom_end = window._local_datetime(window.onence_end_datetime)
+        query_started_at = datetime.now().astimezone()
+
+        window._start_onence_history_query()
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit()
+            if window.onence_query_button.isEnabled() and requests
+            else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert requests
+        query_end = requests[0]["end_datetime"]
+        if period == "Últimos mensajes":
+            assert query_end is None
+        elif period == "Personalizado":
+            assert query_end == custom_end
+        else:
+            assert query_end is not None
+            assert abs((query_end - query_started_at).total_seconds()) < 5
+            assert abs(
+                (
+                    window._local_datetime(window.onence_end_datetime)
+                    - query_started_at
+                ).total_seconds()
+            ) < 5
+    finally:
+        window.close()
+
+
 def test_onence_all_devices_query_does_not_require_manual_iccid(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
@@ -532,6 +643,122 @@ def test_onence_device_selector_keeps_duplicate_labels_and_iccid_fallback(
         assert window.onence_history_table.item(0, 2).text() == "iccid-1"
         assert window.onence_history_table.item(1, 1).text() == "iccid-3"
         assert window.onence_history_table.item(0, 6).text().startswith("JSON válido")
+    finally:
+        window.close()
+
+
+def test_onence_auto_refresh_updates_last_query_time(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    window = MainWindow()
+    try:
+        window.onence_auto_interval_combo.setCurrentText("30 segundos")
+        window.onence_auto_check.setChecked(True)
+        assert window.onence_auto_check.isChecked()
+
+        window._on_onence_history_completed(
+            True,
+            main_window_module.HistoryPage((), None),
+            "",
+        )
+
+        assert window.onence_last_query_label.text().startswith("Última consulta: ")
+        assert "N/D" not in window.onence_last_query_label.text()
+        assert window._cloud_auto_timer.isActive()
+    finally:
+        window.close()
+
+
+def test_onence_auto_timer_runs_history_query_and_refreshes_timestamp(
+    qt_app, monkeypatch
+):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    requests = []
+
+    def get_history_page(self, device_id, **kwargs):
+        requests.append((device_id, kwargs))
+        return main_window_module.HistoryPage((), None)
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient,
+        "get_history_page",
+        get_history_page,
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        window.onence_iccid_edit.setText("0012345678901234567")
+        window.onence_device_mode_combo.setCurrentText("ICCID manual")
+        window.onence_range_combo.setCurrentText("Última hora")
+        window.onence_auto_interval_combo.setCurrentText("30 segundos")
+        window.onence_auto_check.setChecked(True)
+        window._cloud_auto_timer.start(20)
+
+        loop = QEventLoop()
+        poll_timer = QTimer()
+        poll_timer.setInterval(10)
+        poll_timer.timeout.connect(
+            lambda: loop.quit()
+            if requests
+            and window.onence_query_button.isEnabled()
+            and window._onence_history_thread is None
+            and window.onence_last_query_label.text() != "Última consulta: N/D"
+            and window._cloud_auto_timer.isActive()
+            else None
+        )
+        poll_timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll_timer.stop()
+
+        assert len(requests) == 1
+        assert requests[0][0] == "0012345678901234567"
+        assert window.onence_last_query_label.text().startswith("Última consulta: ")
+        assert window.onence_last_query_label.text() != "Última consulta: N/D"
+        assert window._cloud_auto_timer.isActive(), (
+            window.onence_history_status_label.text(),
+            window.onence_auto_check.isChecked(),
+            window.onence_auto_interval_combo.currentText(),
+        )
+        assert window._cloud_auto_timer.remainingTime() > 0
+    finally:
+        window.close()
+
+
+def test_direct_send_transmits_single_character_without_at_terminator_and_displays_rx(
+    qt_app, monkeypatch
+):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    window = MainWindow()
+    transmitted: list[bytes] = []
+    try:
+        window.write_requested.disconnect()
+        window.write_requested.connect(transmitted.append)
+        window._is_connected = True
+        window.command_input.setPlainText("!")
+        window.direct_send_check.setChecked(True)
+        window._update_queue_controls()
+        window._send_command()
+
+        assert transmitted == [b"!"]
+        assert window.command_input.toPlainText() == ""
+
+        window._on_transmitted(transmitted[0])
+        window._on_received(b"ready\r\n")
+        console = window.console.toPlainText()
+        assert "TX → !" in console
+        assert "RX ← ready" in console
     finally:
         window.close()
 
@@ -682,7 +909,7 @@ def test_carecv_preserves_binary_payload_and_uses_reported_length(qt_app, monkey
         window.close()
 
 
-def test_copy_diagnostic_includes_timestamp_all_fields_and_respects_identifier_mask(
+def test_copy_diagnostic_includes_timestamp_all_fields_and_full_identifiers(
     qt_app, monkeypatch, tmp_path
 ):
     assert qt_app is QApplication.instance()
@@ -704,23 +931,23 @@ def test_copy_diagnostic_includes_timestamp_all_fields_and_respects_identifier_m
             }
         )
         window._update_derived_diagnostic_values()
+        window._render_identity_fields()
         window._last_diagnostic_at = datetime(2026, 11, 9, 16, 10, 23)
+
+        assert not hasattr(window, "reveal_identifiers_check")
+        assert window._diagnostic_fields["imei"].text() == "● 123456789012345"
+        assert window._diagnostic_fields["iccid"].text() == "● 8988211000001234567"
 
         window.copy_diagnostic_button.click()
         report = qt_app.clipboard().text()
         assert "Fecha y hora: 09/11/2026 16:10:23" in report
         assert "Fabricante: SIMCOM" in report
         assert "Modelo: N/D" in report
-        assert "IMEI: ***********2345" in report
-        assert "ICCID: ***************4567" in report
-        assert "123456789012345" not in report
+        assert "IMEI: 123456789012345" in report
+        assert "ICCID: 8988211000001234567" in report
         assert "Información ATI: SIM7080G" in report
         assert "Tecnología de acceso reportada: LTE NB-S1 (IoT)" in report
         assert "Calidad de señal NB-IoT: Buena (diagnóstico parcial; N/D: RSRQ, SINR)" in report
-
-        window.reveal_identifiers_check.setChecked(True)
-        window.copy_diagnostic_button.click()
-        assert "IMEI: 123456789012345" in qt_app.clipboard().text()
 
         diagnostic_path = tmp_path / "diagnostic.json"
         monkeypatch.setattr(
@@ -728,11 +955,10 @@ def test_copy_diagnostic_includes_timestamp_all_fields_and_respects_identifier_m
             "getSaveFileName",
             lambda *_args, **_kwargs: (str(diagnostic_path), "JSON (*.json)"),
         )
-        window.reveal_identifiers_check.setChecked(False)
         window._export_diagnostic()
         exported = json.loads(diagnostic_path.read_text(encoding="utf-8"))
         assert exported["diagnostic"]["Calidad de señal NB-IoT"].startswith("Buena")
-        assert exported["diagnostic"]["IMEI"] == "***********2345"
+        assert exported["diagnostic"]["IMEI"] == "123456789012345"
     finally:
         window.close()
 
