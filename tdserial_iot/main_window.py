@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import json
 import logging
+import csv
+from email.utils import parsedate_to_datetime
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot, QDateTime
 from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDateTimeEdit,
     QFileDialog,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,8 +31,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -56,6 +64,28 @@ from tdserial_iot.iot_operations import (
     parse_application_config,
     parse_application_context,
     parse_socket_state,
+)
+from tdserial_iot.onence_api import (
+    ApiCredentials,
+    CredentialStoreError,
+    OneNCEAuthError,
+    OneNCEAuthenticator,
+    delete_api_credentials,
+    load_api_credentials,
+    store_api_credentials,
+)
+from tdserial_iot.onence_historian import (
+    HISTORIAN_MAX_PAGE_SIZE,
+    HISTORIAN_RETENTION_DAYS,
+    CloudMessage,
+    HistoryPage,
+    OneNCEHistorianClient,
+    OneNCEHistoryError,
+    OneNCEDevice,
+    TransmissionCorrelation,
+    correlate_transmissions,
+    render_payload,
+    sort_messages_newest_first,
 )
 from tdserial_iot.protocol import TERMINATORS, encode_at_commands
 from tdserial_iot.serial_lines import CarecvFrameBuffer, SerialLineBuffer
@@ -140,6 +170,148 @@ class CommandTextEdit(QPlainTextEdit):
         self._draft = ""
 
 
+class OneNCEAuthTestWorker(QObject):
+    completed = Signal(bool, str)
+
+    def __init__(self, authenticator: OneNCEAuthenticator) -> None:
+        super().__init__()
+        self._authenticator = authenticator
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._authenticator.get_access_token(force_refresh=True)
+        except (OneNCEAuthError, ValueError) as exc:
+            self.completed.emit(False, str(exc))
+        else:
+            self.completed.emit(True, "Autenticación correcta; token disponible.")
+
+
+class OneNCEHistoryWorker(QObject):
+    completed = Signal(bool, object, str)
+
+    def __init__(
+        self,
+        authenticator: OneNCEAuthenticator,
+        device_id: str | None,
+        *,
+        page_size: int,
+        protocol: str,
+        start_datetime: datetime | None,
+        end_datetime: datetime | None,
+        next_token: str | None,
+        fetch_all: bool,
+        max_records: int,
+    ) -> None:
+        super().__init__()
+        self._authenticator = authenticator
+        self._device_id = device_id
+        self._page_size = page_size
+        self._protocol = protocol
+        self._start_datetime = start_datetime
+        self._end_datetime = end_datetime
+        self._next_token = next_token
+        self._fetch_all = fetch_all
+        self._max_records = max_records
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._authenticator.get_access_token(force_refresh=True)
+            client = OneNCEHistorianClient(self._authenticator)
+            messages: list[CloudMessage] = []
+            token = self._next_token
+            seen_tokens: set[str] = {token} if token is not None else set()
+            next_token: str | None = None
+            while True:
+                query = {
+                    "page_size": self._page_size,
+                    "protocol": self._protocol,
+                    "start_datetime": self._start_datetime,
+                    "end_datetime": self._end_datetime,
+                    "next_token": token,
+                }
+                page = (
+                    client.get_all_history_page(**query)
+                    if self._device_id is None
+                    else client.get_history_page(self._device_id, **query)
+                )
+                known_messages = {_cloud_message_key(item) for item in messages}
+                for item in page.messages:
+                    key = _cloud_message_key(item)
+                    if key not in known_messages:
+                        messages.append(item)
+                        known_messages.add(key)
+                next_token = page.next_token
+                if not self._fetch_all or not next_token:
+                    break
+                if next_token in seen_tokens:
+                    raise OneNCEHistoryError(
+                        "Historian repitió un nextToken; se detuvo la paginación."
+                    )
+                seen_tokens.add(next_token)
+                if len(messages) >= self._max_records:
+                    messages = messages[: self._max_records]
+                    break
+                token = next_token
+            self.completed.emit(
+                True,
+                HistoryPage(tuple(messages), next_token),
+                "",
+            )
+        except (OneNCEAuthError, OneNCEHistoryError, ValueError) as exc:
+            self.completed.emit(False, exc, str(exc))
+
+
+class OneNCEDevicesWorker(QObject):
+    completed = Signal(bool, object, str)
+
+    def __init__(self, authenticator: OneNCEAuthenticator) -> None:
+        super().__init__()
+        self._authenticator = authenticator
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._authenticator.get_access_token(force_refresh=True)
+            client = OneNCEHistorianClient(self._authenticator)
+            iccids = client.get_device_iccids()
+            try:
+                labels = client.get_sim_labels()
+            except (OneNCEAuthError, OneNCEHistoryError, ValueError) as exc:
+                devices = tuple(OneNCEDevice(iccid) for iccid in iccids)
+                self.completed.emit(
+                    True,
+                    devices,
+                    f"No se pudieron obtener los LABEL ({exc}); "
+                    "se muestran los ICCID.",
+                )
+                return
+            devices = tuple(
+                OneNCEDevice(iccid, labels.get(iccid, ""))
+                for iccid in iccids
+            )
+            self.completed.emit(True, devices, "")
+        except (OneNCEAuthError, OneNCEHistoryError, ValueError) as exc:
+            self.completed.emit(False, exc, str(exc))
+
+
+def _cloud_message_key(message: CloudMessage) -> tuple[Any, ...]:
+    if message.message_id:
+        return (
+            "message-id",
+            message.device_id or message.iccid,
+            message.message_id,
+        )
+    return (
+        message.device_id,
+        message.iccid,
+        message.timestamp_original,
+        message.protocol,
+        message.payload_original,
+    )
+
+
 class MainWindow(QMainWindow):
     COMMAND_TIMEOUT_MS = 10_000
     AT_INITIALIZATION_DELAY_MS = 10_000
@@ -199,6 +371,24 @@ class MainWindow(QMainWindow):
         self._iot_file_data: bytes | None = None
         self._iot_file_path: Path | None = None
         self._iot_operation_buttons: list[QPushButton] = []
+        self._onence_auth_thread: QThread | None = None
+        self._onence_auth_worker: OneNCEAuthTestWorker | None = None
+        self._onence_authenticator: OneNCEAuthenticator | None = None
+        self._onence_history_thread: QThread | None = None
+        self._onence_history_worker: OneNCEHistoryWorker | None = None
+        self._onence_devices_thread: QThread | None = None
+        self._onence_devices_worker: OneNCEDevicesWorker | None = None
+        self._onence_device_labels: dict[str, str] = {}
+        self._cloud_messages: list[CloudMessage] = []
+        self._cloud_payload_fields: list[str] = []
+        self._cloud_correlation_by_message: dict[int, str] = {}
+        self._cloud_next_token: str | None = None
+        self._cloud_query_filters: dict[str, Any] | None = None
+        self._cloud_query_started_at: datetime | None = None
+        self._cloud_history_complete = False
+        self._cloud_auto_timer = QTimer(self)
+        self._cloud_auto_timer.setSingleShot(True)
+        self._cloud_auto_timer.timeout.connect(self._query_onence_history)
         self._automatic_monitor_timer = QTimer(self)
         self._automatic_monitor_timer.timeout.connect(self._run_automatic_monitor)
         self._initialization_timer = QTimer(self)
@@ -232,6 +422,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_style()
+        self._load_onence_credentials()
         self.command_input.setEnabled(False)
         self.send_button.setEnabled(False)
         self.terminator_combo.setEnabled(False)
@@ -254,8 +445,1080 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(serial_page, "Monitor serie")
         self.tabs.addTab(self._build_diagnostic_tab(), "Diagnóstico IoT")
         self.tabs.addTab(self._build_communications_tab(), "Comunicaciones IoT")
+        self.tabs.addTab(self._build_onence_cloud_tab(), "1NCE Cloud")
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
+
+    def _build_onence_cloud_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        credentials_group = QGroupBox("Configuración API 1NCE")
+        credentials_layout = QGridLayout(credentials_group)
+
+        self.onence_client_id_edit = QLineEdit()
+        self.onence_client_id_edit.setPlaceholderText("Client ID o usuario API")
+        self.onence_client_secret_edit = QLineEdit()
+        self.onence_client_secret_edit.setPlaceholderText(
+            "Client Secret o contraseña API"
+        )
+        self.onence_client_secret_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.onence_client_id_edit.textChanged.connect(
+            self._invalidate_onence_authenticator
+        )
+        self.onence_client_secret_edit.textChanged.connect(
+            self._invalidate_onence_authenticator
+        )
+        self.onence_auth_status_label = QLabel("Autenticación no probada")
+        self.onence_auth_status_label.setObjectName("disconnectedStatus")
+        self.onence_endpoint_label = QLabel(
+            "OAuth: https://api.1nce.com/management-api/oauth/token · "
+            "Historian: /v1/inspect/devices/{deviceId}/history"
+        )
+        self.onence_endpoint_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        self.onence_test_button = QPushButton("Probar conexión")
+        self.onence_test_button.setObjectName("primaryButton")
+        self.onence_test_button.clicked.connect(self._test_onence_connection)
+        self.onence_save_credentials_button = QPushButton("Guardar credenciales")
+        self.onence_save_credentials_button.clicked.connect(
+            self._save_onence_credentials
+        )
+        self.onence_delete_credentials_button = QPushButton("Borrar credenciales")
+        self.onence_delete_credentials_button.clicked.connect(
+            self._delete_onence_credentials
+        )
+
+        credentials_layout.addWidget(QLabel("Client ID / usuario API"), 0, 0)
+        credentials_layout.addWidget(self.onence_client_id_edit, 0, 1, 1, 3)
+        credentials_layout.addWidget(QLabel("Client Secret / contraseña API"), 1, 0)
+        credentials_layout.addWidget(self.onence_client_secret_edit, 1, 1, 1, 3)
+        credentials_layout.addWidget(self.onence_test_button, 2, 0)
+        credentials_layout.addWidget(self.onence_save_credentials_button, 2, 1)
+        credentials_layout.addWidget(self.onence_delete_credentials_button, 2, 2)
+        credentials_layout.addWidget(self.onence_auth_status_label, 2, 3)
+        credentials_layout.addWidget(self.onence_endpoint_label, 3, 0, 1, 4)
+        layout.addWidget(credentials_group)
+        layout.addWidget(
+            QLabel(
+                "Las credenciales se guardan únicamente en el almacén seguro de "
+                "Windows. La autenticación no requiere que COM6 esté conectado."
+            )
+        )
+
+        device_group = QGroupBox("Consulta de History")
+        device_layout = QGridLayout(device_group)
+        self.onence_device_mode_combo = self._combo(
+            ["Todos los dispositivos", "Seleccionar dispositivo", "ICCID manual"],
+            "Todos los dispositivos",
+        )
+        self.onence_device_mode_combo.currentTextChanged.connect(
+            self._onence_device_mode_changed
+        )
+        self.onence_iccid_edit = QLineEdit(str(self._config.get("onence_iccid", "")))
+        self.onence_iccid_edit.setPlaceholderText("Device ID exacto de Device Inspector")
+        self.onence_iccid_edit.setToolTip(
+            "Se envía exactamente el identificador escrito; no se quitan dígitos."
+        )
+        self.onence_iccid_edit.textChanged.connect(self._persist_config)
+        self.onence_device_combo = self._combo([], "")
+        self.onence_device_combo.setToolTip("LABEL e ICCID del dispositivo 1NCE.")
+        self.onence_device_combo.setEnabled(False)
+        self.onence_device_input_stack = QStackedWidget()
+        self.onence_device_input_stack.addWidget(QLabel("No se requiere ICCID"))
+        self.onence_device_input_stack.addWidget(self.onence_device_combo)
+        self.onence_device_input_stack.addWidget(self.onence_iccid_edit)
+        self.onence_device_input_stack.setCurrentIndex(0)
+        self.onence_update_devices_button = QPushButton("Actualizar dispositivos")
+        self.onence_update_devices_button.clicked.connect(
+            self._start_onence_devices_refresh
+        )
+        self.onence_get_iccid_button = QPushButton("Obtener ICCID del módem")
+        self.onence_get_iccid_button.setToolTip(
+            "Copia el ICCID AT+CCID completo. Puede diferir del Device ID de "
+            "Device Inspector y no se recortan dígitos automáticamente."
+        )
+        self.onence_get_iccid_button.clicked.connect(self._get_onence_iccid_from_modem)
+        self.onence_range_combo = self._combo(
+            ["Últimos mensajes", "Última hora", "Últimas 24 horas", "Últimos 7 días", "Personalizado"],
+            "Últimos 7 días",
+        )
+        self.onence_range_combo.currentTextChanged.connect(
+            self._apply_onence_date_preset
+        )
+        self.onence_start_datetime = QDateTimeEdit()
+        self.onence_start_datetime.setCalendarPopup(True)
+        self.onence_start_datetime.setDisplayFormat("dd/MM/yyyy HH:mm:ss")
+        self.onence_end_datetime = QDateTimeEdit()
+        self.onence_end_datetime.setCalendarPopup(True)
+        self.onence_end_datetime.setDisplayFormat("dd/MM/yyyy HH:mm:ss")
+        self.onence_end_datetime.setDateTime(QDateTime.currentDateTime())
+        self.onence_start_datetime.setDateTime(
+            QDateTime.currentDateTime().addDays(-HISTORIAN_RETENTION_DAYS)
+        )
+        self.onence_protocol_combo = self._combo(
+            ["UDP", "CoAP", "LwM2M", "Todos"], "UDP"
+        )
+        self.onence_page_size_spin = QSpinBox()
+        self.onence_page_size_spin.setRange(1, HISTORIAN_MAX_PAGE_SIZE)
+        self.onence_page_size_spin.setValue(10)
+        self.onence_max_records_spin = QSpinBox()
+        self.onence_max_records_spin.setRange(1, 1000)
+        self.onence_max_records_spin.setValue(100)
+        self.onence_query_button = QPushButton("Consultar History")
+        self.onence_query_button.setObjectName("primaryButton")
+        self.onence_query_button.clicked.connect(
+            lambda: self._start_onence_history_query()
+        )
+        self.onence_more_button = QPushButton("Cargar más")
+        self.onence_more_button.clicked.connect(
+            lambda: self._start_onence_history_query(load_more=True)
+        )
+        self.onence_all_button = QPushButton("Recuperar todos (límite)")
+        self.onence_all_button.clicked.connect(
+            lambda: self._start_onence_history_query(fetch_all=True)
+        )
+        self.onence_auto_check = QCheckBox("Actualización automática")
+        self.onence_auto_check.toggled.connect(self._toggle_onence_auto_update)
+        self.onence_auto_interval_combo = self._combo(
+            ["Manual", "30 segundos", "60 segundos", "5 minutos"], "Manual"
+        )
+        self.onence_auto_interval_combo.currentTextChanged.connect(
+            self._update_onence_auto_interval
+        )
+        self.onence_history_status_label = QLabel("Historial no consultado")
+        self.onence_last_query_label = QLabel("Última consulta: N/D")
+        self.onence_stats_label = QLabel(
+            "Registros en History: 0 · UDP: 0 · Envíos locales: 0"
+        )
+        device_layout.addWidget(QLabel("Modo de consulta"), 0, 0)
+        device_layout.addWidget(self.onence_device_mode_combo, 0, 1)
+        device_layout.addWidget(self.onence_device_input_stack, 0, 2, 1, 2)
+        device_layout.addWidget(self.onence_update_devices_button, 0, 4)
+        device_layout.addWidget(self.onence_get_iccid_button, 0, 5)
+        device_id_help = QLabel(
+            "Puedes consultar todos los dispositivos, seleccionar una SIM por LABEL "
+            "o introducir manualmente el Device ID exacto de Device Inspector."
+        )
+        device_id_help.setWordWrap(True)
+        device_layout.addWidget(device_id_help, 1, 0, 1, 6)
+        device_layout.addWidget(QLabel("Periodo"), 2, 0)
+        device_layout.addWidget(self.onence_range_combo, 2, 1)
+        device_layout.addWidget(QLabel("Desde"), 2, 2)
+        device_layout.addWidget(self.onence_start_datetime, 2, 3)
+        device_layout.addWidget(QLabel("Hasta"), 2, 4)
+        device_layout.addWidget(self.onence_end_datetime, 2, 5)
+        device_layout.addWidget(QLabel("Protocolo"), 3, 0)
+        device_layout.addWidget(self.onence_protocol_combo, 3, 1)
+        device_layout.addWidget(QLabel("Por página"), 3, 2)
+        device_layout.addWidget(self.onence_page_size_spin, 3, 3)
+        device_layout.addWidget(QLabel("Máximo total"), 3, 4)
+        device_layout.addWidget(self.onence_max_records_spin, 3, 5)
+        device_layout.addWidget(self.onence_query_button, 4, 0)
+        device_layout.addWidget(self.onence_more_button, 4, 1)
+        device_layout.addWidget(self.onence_all_button, 4, 2)
+        device_layout.addWidget(self.onence_auto_check, 4, 3)
+        device_layout.addWidget(self.onence_auto_interval_combo, 4, 4)
+        device_layout.addWidget(self.onence_history_status_label, 5, 0, 1, 3)
+        device_layout.addWidget(self.onence_last_query_label, 5, 3, 1, 3)
+        device_layout.addWidget(self.onence_stats_label, 6, 0, 1, 6)
+        layout.addWidget(device_group)
+
+        self.onence_history_table = QTableWidget(0, 8)
+        self.onence_history_table.setHorizontalHeaderLabels(
+            [
+                "Fecha y hora",
+                "LABEL",
+                "ICCID",
+                "Protocolo",
+                "Contenido",
+                "Tamaño",
+                "Estado de decodificación",
+                "Correlación",
+            ]
+        )
+        self.onence_history_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.onence_history_table.setMinimumHeight(145)
+        self.onence_history_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.onence_history_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.onence_history_table.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+        self.onence_history_table.verticalHeader().setDefaultSectionSize(26)
+        self.onence_history_table.itemSelectionChanged.connect(
+            self._show_selected_onence_message
+        )
+        history_header = self.onence_history_table.horizontalHeader()
+        history_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        history_header.setStretchLastSection(False)
+        history_widths = (150, 170, 190, 85, 260, 70, 220, 190)
+        for column, width in enumerate(history_widths):
+            self.onence_history_table.setColumnWidth(column, width)
+        layout.addWidget(self.onence_history_table, 1)
+
+        detail_controls = QHBoxLayout()
+        self.onence_payload_view_combo = self._combo(
+            ["Original", "JSON", "Texto", "Base64 decodificado", "HEX"], "Original"
+        )
+        self.onence_payload_view_combo.currentTextChanged.connect(
+            self._render_selected_onence_message
+        )
+        copy_payload_button = QPushButton("Copiar contenido")
+        copy_payload_button.clicked.connect(self._copy_onence_message)
+        copy_json_button = QPushButton("Copiar JSON")
+        copy_json_button.clicked.connect(self._copy_onence_json)
+        export_message_button = QPushButton("Exportar mensaje")
+        export_message_button.clicked.connect(self._export_selected_onence_message)
+        self.onence_export_json_button = QPushButton("Exportar JSON")
+        self.onence_export_json_button.clicked.connect(
+            lambda: self._export_onence_messages("json")
+        )
+        self.onence_export_csv_button = QPushButton("Exportar CSV")
+        self.onence_export_csv_button.clicked.connect(
+            lambda: self._export_onence_messages("csv")
+        )
+        detail_controls.addWidget(QLabel("Representación"))
+        detail_controls.addWidget(self.onence_payload_view_combo)
+        detail_controls.addWidget(copy_payload_button)
+        detail_controls.addWidget(copy_json_button)
+        detail_controls.addWidget(export_message_button)
+        detail_controls.addWidget(self.onence_export_json_button)
+        detail_controls.addWidget(self.onence_export_csv_button)
+        layout.addLayout(detail_controls)
+        self.onence_message_detail = QPlainTextEdit()
+        self.onence_message_detail.setReadOnly(True)
+        self.onence_message_detail.setMaximumHeight(150)
+        layout.addWidget(self.onence_message_detail)
+        return page
+
+    def _load_onence_credentials(self) -> None:
+        try:
+            credentials = load_api_credentials()
+        except CredentialStoreError as exc:
+            self._set_onence_auth_status(str(exc), success=False)
+            return
+        if credentials is not None:
+            self.onence_client_id_edit.setText(credentials.client_id)
+            self.onence_client_secret_edit.setText(credentials.client_secret)
+            self._onence_authenticator = OneNCEAuthenticator(credentials)
+            self.onence_auth_status_label.setText(
+                "Credenciales disponibles en el almacén seguro"
+            )
+
+    def _onence_credentials_from_fields(self) -> ApiCredentials:
+        return ApiCredentials(
+            client_id=self.onence_client_id_edit.text().strip(),
+            client_secret=self.onence_client_secret_edit.text(),
+        )
+
+    def _invalidate_onence_authenticator(self) -> None:
+        self._onence_authenticator = None
+
+    def _test_onence_connection(self) -> None:
+        if self._onence_auth_thread is not None:
+            return
+        try:
+            credentials = self._onence_credentials_from_fields()
+            if not credentials.client_id or not credentials.client_secret:
+                raise ValueError("Introduce el identificador y el secreto API.")
+        except ValueError as exc:
+            self._set_onence_auth_status(str(exc), success=False)
+            return
+
+        authenticator = OneNCEAuthenticator(credentials)
+        thread = QThread(self)
+        worker = OneNCEAuthTestWorker(authenticator)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._on_onence_auth_test_completed)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda current=thread: self._on_onence_auth_thread_finished(current)
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._onence_authenticator = authenticator
+        self._onence_auth_thread = thread
+        self._onence_auth_worker = worker
+        self.onence_test_button.setEnabled(False)
+        self._set_onence_auth_status("Conectando con 1NCE…", success=None)
+        thread.start()
+
+    @Slot(bool, str)
+    def _on_onence_auth_test_completed(self, success: bool, message: str) -> None:
+        self.onence_test_button.setEnabled(True)
+        self._set_onence_auth_status(message, success=success)
+        if success:
+            logger.info("Autenticación API 1NCE completada correctamente")
+        else:
+            logger.warning("Falló la autenticación API 1NCE: %s", message)
+
+    def _on_onence_auth_thread_finished(self, thread: QThread) -> None:
+        if self._onence_auth_thread is thread:
+            self._onence_auth_thread = None
+            self._onence_auth_worker = None
+
+    def _save_onence_credentials(self) -> None:
+        try:
+            credentials = self._onence_credentials_from_fields()
+            store_api_credentials(credentials)
+        except (CredentialStoreError, ValueError) as exc:
+            self._set_onence_auth_status(str(exc), success=False)
+            return
+        self._onence_authenticator = OneNCEAuthenticator(credentials)
+        self._set_onence_auth_status(
+            "Credenciales guardadas en el almacén seguro de Windows.", success=True
+        )
+
+    def _delete_onence_credentials(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Borrar credenciales 1NCE",
+            "¿Quieres borrar las credenciales guardadas en el almacén seguro de Windows?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_api_credentials()
+        except CredentialStoreError as exc:
+            self._set_onence_auth_status(str(exc), success=False)
+            return
+        self.onence_client_id_edit.clear()
+        self.onence_client_secret_edit.clear()
+        self._onence_authenticator = None
+        self._set_onence_auth_status("Credenciales borradas.", success=None)
+
+    def _set_onence_auth_status(
+        self, message: str, *, success: bool | None
+    ) -> None:
+        self.onence_auth_status_label.setText(message)
+        object_name = (
+            "connectedStatus"
+            if success is True
+            else "disconnectedStatus"
+            if success is False
+            else "disconnectedStatus"
+        )
+        self.onence_auth_status_label.setObjectName(object_name)
+        self.onence_auth_status_label.style().unpolish(self.onence_auth_status_label)
+        self.onence_auth_status_label.style().polish(self.onence_auth_status_label)
+
+    def _get_onence_iccid_from_modem(self) -> None:
+        self.onence_device_mode_combo.setCurrentText("ICCID manual")
+        if not self._is_connected:
+            self.onence_history_status_label.setText(
+                "Puerto serie desconectado; introduce el ICCID manualmente."
+            )
+            return
+        self._start_diagnostic(("iccid",))
+
+    def _query_onence_history(self) -> None:
+        self._start_onence_history_query()
+
+    def _onence_device_mode_changed(self, mode: str) -> None:
+        mode_index = {
+            "Todos los dispositivos": 0,
+            "Seleccionar dispositivo": 1,
+            "ICCID manual": 2,
+        }.get(mode, 0)
+        self.onence_device_input_stack.setCurrentIndex(mode_index)
+        if mode == "Seleccionar dispositivo" and self.onence_device_combo.count() == 0:
+            self.onence_history_status_label.setText(
+                "Actualiza los dispositivos para seleccionar una SIM por LABEL."
+            )
+
+    def _start_onence_devices_refresh(self) -> None:
+        if self._onence_devices_thread is not None:
+            self.onence_history_status_label.setText(
+                "La actualización de dispositivos ya está en curso."
+            )
+            return
+        if self._onence_authenticator is None:
+            try:
+                credentials = self._onence_credentials_from_fields()
+                if not credentials.client_id or not credentials.client_secret:
+                    raise ValueError(
+                        "Configura las credenciales API antes de actualizar "
+                        "los dispositivos."
+                    )
+            except ValueError as exc:
+                self.onence_history_status_label.setText(str(exc))
+                return
+            self._onence_authenticator = OneNCEAuthenticator(credentials)
+
+        thread = QThread(self)
+        worker = OneNCEDevicesWorker(self._onence_authenticator)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._on_onence_devices_completed)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda current=thread: self._on_onence_devices_thread_finished(current)
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._onence_devices_thread = thread
+        self._onence_devices_worker = worker
+        self.onence_update_devices_button.setEnabled(False)
+        self.onence_history_status_label.setText(
+            "Actualizando dispositivos y LABEL desde 1NCE…"
+        )
+        thread.start()
+
+    @Slot(bool, object, str)
+    def _on_onence_devices_completed(
+        self, success: bool, result: object, message: str
+    ) -> None:
+        self.onence_update_devices_button.setEnabled(True)
+        if not success or not isinstance(result, tuple):
+            self.onence_history_status_label.setText(message)
+            logger.warning("No se pudieron actualizar los dispositivos 1NCE: %s", message)
+            return
+        previous_iccid = self.onence_device_combo.currentData()
+        self.onence_device_combo.clear()
+        self._onence_device_labels.clear()
+        seen_iccids: set[str] = set()
+        for device in result:
+            if not isinstance(device, OneNCEDevice) or device.iccid in seen_iccids:
+                continue
+            seen_iccids.add(device.iccid)
+            self._onence_device_labels[device.iccid] = device.label
+            label = device.label or device.iccid
+            display = (
+                f"{label} — {device.iccid}"
+                if device.label and device.label != device.iccid
+                else device.iccid
+            )
+            self.onence_device_combo.addItem(display, device.iccid)
+        self.onence_device_combo.setEnabled(bool(seen_iccids))
+        if previous_iccid is not None:
+            previous_index = self.onence_device_combo.findData(previous_iccid)
+            if previous_index >= 0:
+                self.onence_device_combo.setCurrentIndex(previous_index)
+        if message:
+            logger.warning("Actualización parcial de dispositivos 1NCE: %s", message)
+            status = message
+        elif not seen_iccids:
+            status = "No se encontraron dispositivos en la organización."
+        else:
+            status = f"Dispositivos actualizados: {len(seen_iccids)}."
+        self.onence_history_status_label.setText(status)
+        if self._cloud_messages:
+            self._render_onence_history_table()
+
+    def _on_onence_devices_thread_finished(self, thread: QThread) -> None:
+        if self._onence_devices_thread is thread:
+            self._onence_devices_thread = None
+            self._onence_devices_worker = None
+
+    def _apply_onence_date_preset(self, preset: str) -> None:
+        if preset == "Personalizado":
+            return
+        now = QDateTime.currentDateTime()
+        self.onence_end_datetime.setDateTime(now)
+        if preset == "Última hora":
+            start = now.addSecs(-60 * 60)
+        elif preset == "Últimas 24 horas":
+            start = now.addDays(-1)
+        elif preset == "Últimos 7 días":
+            start = now.addDays(-HISTORIAN_RETENTION_DAYS)
+        else:
+            self.onence_start_datetime.setDateTime(
+                now.addDays(-HISTORIAN_RETENTION_DAYS)
+            )
+            return
+        self.onence_start_datetime.setDateTime(start)
+
+    @staticmethod
+    def _local_datetime(edit: QDateTimeEdit) -> datetime:
+        value = edit.dateTime().toPython()
+        return value.astimezone() if value.tzinfo is None else value
+
+    def _start_onence_history_query(
+        self, *, load_more: bool = False, fetch_all: bool = False
+    ) -> None:
+        if self._onence_history_thread is not None:
+            self.onence_history_status_label.setText(
+                "Ya hay una consulta de History en curso."
+            )
+            return
+        mode = self.onence_device_mode_combo.currentText()
+        if mode == "Todos los dispositivos":
+            device_id = None
+        elif mode == "Seleccionar dispositivo":
+            selected = self.onence_device_combo.currentData()
+            device_id = str(selected).strip() if selected is not None else ""
+        else:
+            device_id = self.onence_iccid_edit.text().strip()
+        if device_id == "":
+            self.onence_history_status_label.setText(
+                "Selecciona un dispositivo actualizado o introduce un "
+                "ICCID / Device ID manual."
+            )
+            return
+        if load_more and not self._cloud_next_token:
+            self.onence_history_status_label.setText(
+                "No hay más páginas disponibles; consulta de nuevo para actualizar."
+            )
+            return
+        if load_more:
+            if self._cloud_query_filters is None:
+                self.onence_history_status_label.setText(
+                    "No hay una consulta anterior para continuar."
+                )
+                return
+            query_filters = self._cloud_query_filters
+        else:
+            start_datetime: datetime | None = None
+            end_datetime: datetime | None = None
+            if self.onence_range_combo.currentText() != "Últimos mensajes":
+                if self.onence_range_combo.currentText() == "Últimos 7 días":
+                    preset_end = QDateTime.currentDateTime()
+                    self.onence_end_datetime.setDateTime(preset_end)
+                    self.onence_start_datetime.setDateTime(
+                        preset_end.addDays(-HISTORIAN_RETENTION_DAYS).addSecs(60)
+                    )
+                start_datetime = self._local_datetime(self.onence_start_datetime)
+                end_datetime = self._local_datetime(self.onence_end_datetime)
+                now = datetime.now().astimezone()
+                if start_datetime > end_datetime:
+                    self.onence_history_status_label.setText(
+                        "La fecha inicial debe ser anterior a la fecha final."
+                    )
+                    return
+                if end_datetime > now:
+                    self.onence_history_status_label.setText(
+                        "La fecha final no puede estar en el futuro."
+                    )
+                    return
+                if start_datetime < now - timedelta(
+                    days=HISTORIAN_RETENTION_DAYS, seconds=60
+                ):
+                    self.onence_history_status_label.setText(
+                        "El intervalo supera la retención de siete días de Historian."
+                    )
+                    return
+            query_filters = {
+                "mode": mode,
+                "device_id": device_id,
+                "page_size": self.onence_page_size_spin.value(),
+                "protocol": self.onence_protocol_combo.currentText(),
+                "start_datetime": start_datetime,
+                "end_datetime": end_datetime,
+            }
+            self._cloud_query_filters = query_filters
+            self._cloud_history_complete = False
+
+        if self._onence_authenticator is None:
+            try:
+                credentials = self._onence_credentials_from_fields()
+                if not credentials.client_id or not credentials.client_secret:
+                    raise ValueError(
+                        "Configura las credenciales API antes de consultar History."
+                    )
+            except ValueError as exc:
+                self.onence_history_status_label.setText(str(exc))
+                return
+            self._onence_authenticator = OneNCEAuthenticator(credentials)
+
+        thread = QThread(self)
+        worker = OneNCEHistoryWorker(
+            self._onence_authenticator,
+            query_filters["device_id"],
+            page_size=query_filters["page_size"],
+            protocol=query_filters["protocol"],
+            start_datetime=query_filters["start_datetime"],
+            end_datetime=query_filters["end_datetime"],
+            next_token=self._cloud_next_token if load_more else None,
+            fetch_all=fetch_all,
+            max_records=self.onence_max_records_spin.value(),
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(
+            lambda success, page, message, append=load_more: self._on_onence_history_completed(
+                success, page, message, append=append
+            )
+        )
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda current=thread: self._on_onence_history_thread_finished(current)
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._onence_history_thread = thread
+        self._onence_history_worker = worker
+        self._cloud_query_started_at = datetime.now().astimezone()
+        self.onence_query_button.setEnabled(False)
+        self.onence_more_button.setEnabled(False)
+        self.onence_all_button.setEnabled(False)
+        self.onence_history_status_label.setText("Consultando 1NCE Historian…")
+        thread.start()
+
+    @Slot(bool, object, str)
+    def _on_onence_history_completed(
+        self,
+        success: bool,
+        page: object,
+        message: str,
+        *,
+        append: bool = False,
+    ) -> None:
+        self.onence_query_button.setEnabled(True)
+        self.onence_more_button.setEnabled(True)
+        self.onence_all_button.setEnabled(True)
+        if not success or not isinstance(page, HistoryPage):
+            self.onence_history_status_label.setText(message)
+            logger.warning("Consulta de Historian fallida: %s", message)
+            retry_after = (
+                page.retry_after
+                if isinstance(page, OneNCEHistoryError)
+                else None
+            )
+            delay_ms = self._onence_auto_delay_ms(retry_after)
+            if delay_ms is not None:
+                self._cloud_auto_timer.start(delay_ms)
+            return
+
+        if not append:
+            self._cloud_messages = []
+            self.onence_history_table.setRowCount(0)
+        existing_keys = {_cloud_message_key(item) for item in self._cloud_messages}
+        for item in page.messages:
+            key = _cloud_message_key(item)
+            if key not in existing_keys:
+                self._cloud_messages.append(item)
+                existing_keys.add(key)
+        self._cloud_messages = list(
+            sort_messages_newest_first(self._cloud_messages)
+        )
+        self._cloud_next_token = page.next_token
+        self._cloud_history_complete = page.next_token is None
+        self._render_onence_history_table()
+        self.onence_last_query_label.setText(
+            "Última consulta: "
+            + datetime.now().astimezone().strftime("%d/%m/%Y %H:%M:%S")
+        )
+        self.onence_history_status_label.setText(
+            "Consulta correcta; no hay mensajes en el intervalo."
+            if not self._cloud_messages
+            else (
+                f"History actualizado: {len(page.messages)} mensaje(s) "
+                "en esta consulta."
+            )
+        )
+        self._update_onence_statistics()
+        delay_ms = self._onence_auto_delay_ms()
+        if delay_ms is not None:
+            self._cloud_auto_timer.start(delay_ms)
+
+    def _onence_auto_delay_ms(self, retry_after: str | None = None) -> int | None:
+        if not self.onence_auto_check.isChecked():
+            return None
+        interval_ms = {
+            "30 segundos": 30_000,
+            "60 segundos": 60_000,
+            "5 minutos": 300_000,
+        }.get(self.onence_auto_interval_combo.currentText())
+        if interval_ms is None:
+            return None
+        if retry_after is None:
+            return interval_ms
+        try:
+            retry_seconds = max(0, int(retry_after))
+        except ValueError:
+            try:
+                retry_time = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError, OverflowError):
+                return interval_ms
+            if retry_time.tzinfo is None:
+                retry_time = retry_time.astimezone()
+            retry_seconds = max(
+                0,
+                int((retry_time - datetime.now().astimezone()).total_seconds()),
+            )
+        return max(interval_ms, retry_seconds * 1000)
+
+    def _on_onence_history_thread_finished(self, thread: QThread) -> None:
+        if self._onence_history_thread is thread:
+            self._onence_history_thread = None
+            self._onence_history_worker = None
+
+    def _append_onence_message_row(
+        self, message: CloudMessage, message_index: int
+    ) -> None:
+        row = self.onence_history_table.rowCount()
+        self.onence_history_table.insertRow(row)
+        if message.timestamp is None:
+            timestamp_text = message.timestamp_original or "N/D"
+        elif message.has_timezone:
+            timestamp_text = message.timestamp.astimezone().strftime(
+                "%d/%m/%Y %H:%M:%S"
+            )
+        else:
+            timestamp_text = (
+                message.timestamp.strftime("%d/%m/%Y %H:%M:%S")
+                + " (zona no indicada)"
+            )
+        payload_bytes = (
+            message.payload_bytes
+            if message.payload_bytes is not None
+            else message.payload_original.encode("utf-8", errors="replace")
+        )
+        decoded_payload = self._decoded_payload_for_export(message)
+        payload_object = decoded_payload if isinstance(decoded_payload, dict) else {}
+        content = self._format_onence_table_value(decoded_payload)
+        if isinstance(decoded_payload, str):
+            content = decoded_payload.replace("\n", " ").replace("\r", " ")
+        iccid = message.iccid or message.device_id or "N/D"
+        label = self._onence_device_labels.get(iccid, "") or iccid
+        values = (
+            timestamp_text,
+            label,
+            iccid,
+            message.protocol,
+            content,
+            str(len(payload_bytes)),
+            message.decode_status,
+            self._cloud_message_correlation_status(message_index),
+            *(
+                self._format_onence_table_value(payload_object.get(field, ""))
+                for field in self._cloud_payload_fields
+            ),
+        )
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setData(Qt.ItemDataRole.UserRole, message_index)
+            self.onence_history_table.setItem(row, column, item)
+
+    @staticmethod
+    def _format_onence_table_value(value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if value is None:
+            return "null"
+        return str(value)
+
+    def _show_selected_onence_message(self) -> None:
+        self._render_selected_onence_message()
+
+    def _render_selected_onence_message(self, representation: str = "") -> None:
+        row = self.onence_history_table.currentRow()
+        if row < 0 or row >= len(self._cloud_messages):
+            self.onence_message_detail.clear()
+            return
+        message = self._cloud_messages[row]
+        selected_representation = (
+            representation or self.onence_payload_view_combo.currentText()
+        )
+        try:
+            payload_text = render_payload(message, selected_representation)
+        except ValueError as exc:
+            payload_text = f"No disponible: {exc}\n\nPayload original:\n{message.payload_original}"
+        if message.timestamp is None:
+            timestamp_text = message.timestamp_original or "N/D"
+        elif message.has_timezone:
+            timestamp_text = message.timestamp.astimezone().isoformat()
+        else:
+            timestamp_text = message.timestamp.isoformat() + " (zona no indicada)"
+        self.onence_message_detail.setPlainText(
+            f"Fecha: {timestamp_text}\n"
+            f"ICCID: {message.iccid}\n"
+            f"Protocolo: {message.protocol}\n"
+            f"Tipo: {message.content_type} · {message.decode_status}\n\n"
+            f"Payload original:\n{message.payload_original}\n\n"
+            f"Representación {selected_representation}:\n"
+            f"{payload_text}"
+        )
+
+    def _copy_onence_message(self) -> None:
+        row = self.onence_history_table.currentRow()
+        if row < 0 or row >= len(self._cloud_messages):
+            self.onence_history_status_label.setText(
+                "Selecciona un mensaje para copiar su contenido."
+            )
+            return
+        message = self._cloud_messages[row]
+        try:
+            text = render_payload(
+                message, self.onence_payload_view_combo.currentText()
+            )
+        except ValueError as exc:
+            self.onence_history_status_label.setText(str(exc))
+            return
+        QApplication.clipboard().setText(text)
+
+    def _copy_onence_json(self) -> None:
+        row = self.onence_history_table.currentRow()
+        if row < 0 or row >= len(self._cloud_messages):
+            self.onence_history_status_label.setText(
+                "Selecciona un mensaje para copiar su JSON."
+            )
+            return
+        message = self._cloud_messages[row]
+        try:
+            text = render_payload(message, "JSON")
+        except ValueError as exc:
+            self.onence_history_status_label.setText(str(exc))
+            return
+        QApplication.clipboard().setText(text)
+
+    @staticmethod
+    def _decoded_payload_for_export(message: CloudMessage) -> Any:
+        try:
+            return json.loads(render_payload(message, "JSON"))
+        except ValueError:
+            pass
+        if message.payload_bytes is None:
+            return None
+        try:
+            return message.payload_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return {"hex": message.payload_bytes.hex(" ").upper()}
+
+    def _export_selected_onence_message(self) -> None:
+        row = self.onence_history_table.currentRow()
+        if row < 0 or row >= len(self._cloud_messages):
+            self.onence_history_status_label.setText(
+                "Selecciona un mensaje para exportarlo."
+            )
+            return
+        message = self._cloud_messages[row]
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar mensaje 1NCE",
+            str(Path.home() / "onence-message.json"),
+            "Archivo JSON (*.json)",
+        )
+        if not filename:
+            return
+        content = {
+            "time": message.timestamp_original,
+            "label": self._onence_device_labels.get(
+                message.iccid or message.device_id, ""
+            ),
+            "iccid": message.iccid,
+            "deviceId": message.device_id,
+            "protocol": message.protocol,
+            "payload": message.payload_original,
+            "payload_decoded": self._decoded_payload_for_export(message),
+            "content_type": message.content_type,
+            "decode_status": message.decode_status,
+            "correlation_status": self._cloud_message_correlation_status(row),
+        }
+        try:
+            Path(filename).write_text(
+                json.dumps(content, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.exception("No se pudo exportar el mensaje 1NCE a %s", filename)
+            QMessageBox.critical(
+                self, "Error al exportar", f"No se pudo guardar el mensaje.\n{exc}"
+            )
+
+    def _update_onence_statistics(self) -> None:
+        udp_count = sum(message.protocol == "UDP" for message in self._cloud_messages)
+        correlations = self._get_onence_correlations()
+        self._cloud_correlation_by_message = {
+            item.cloud_index: item.status
+            for item in correlations
+            if item.cloud_index is not None
+        }
+        local_sends = len(correlations)
+        confirmed = sum(
+            item.status == "Confirmado en 1NCE" for item in correlations
+        )
+        pending = sum(
+            item.status == "Pendiente de confirmación en 1NCE"
+            for item in correlations
+        )
+        not_found = sum(
+            item.status == "No encontrado en el periodo consultado"
+            for item in correlations
+        )
+        aware_timestamps = [
+            message.timestamp
+            for message in self._cloud_messages
+            if message.timestamp is not None and message.timestamp.tzinfo is not None
+        ]
+        naive_timestamps = [
+            message.timestamp
+            for message in self._cloud_messages
+            if message.timestamp is not None and message.timestamp.tzinfo is None
+        ]
+        if aware_timestamps and not naive_timestamps:
+            latest = max(aware_timestamps).astimezone()
+            latest_text = latest.strftime("%d/%m/%Y %H:%M:%S")
+        elif naive_timestamps and not aware_timestamps:
+            latest = max(naive_timestamps)
+            latest_text = latest.strftime("%d/%m/%Y %H:%M:%S (zona no indicada)")
+        elif aware_timestamps and naive_timestamps:
+            latest_text = "N/D (zonas horarias mixtas)"
+        else:
+            latest_text = "N/D"
+        self.onence_stats_label.setText(
+            f"Registros recibidos en esta consulta: {len(self._cloud_messages)} · "
+            f"UDP: {udp_count} · Envíos locales: {local_sends} · "
+            f"Pendientes: {pending} · Confirmados: {confirmed} · "
+            f"No encontrados en la consulta: {not_found} · "
+            f"Último mensaje: {latest_text} · "
+            "'No encontrado' no confirma una pérdida"
+        )
+
+    def _get_onence_correlations(self) -> tuple[TransmissionCorrelation, ...]:
+        if self._cloud_query_filters is not None:
+            if self._cloud_query_filters.get("mode") == "Todos los dispositivos":
+                return ()
+            device_id = self._cloud_query_filters.get("device_id")
+        else:
+            device_id = self.onence_iccid_edit.text().strip()
+        if not device_id:
+            return ()
+        return correlate_transmissions(
+            self._iot_history,
+            self._cloud_messages,
+            device_id,
+            history_queried=self._cloud_history_complete,
+        )
+
+    def _cloud_message_correlation_status(self, cloud_index: int) -> str:
+        return self._cloud_correlation_by_message.get(cloud_index, "—")
+
+    def _render_onence_history_table(self) -> None:
+        correlations = self._get_onence_correlations()
+        self._cloud_correlation_by_message = {
+            item.cloud_index: item.status
+            for item in correlations
+            if item.cloud_index is not None
+        }
+        decoded_payloads = [
+            self._decoded_payload_for_export(message)
+            for message in self._cloud_messages
+        ]
+        self._cloud_payload_fields = list(
+            dict.fromkeys(
+                field
+                for payload in decoded_payloads
+                if isinstance(payload, dict)
+                for field in payload
+            )
+        )
+        headers = [
+            "Fecha y hora",
+            "LABEL",
+            "ICCID",
+            "Protocolo",
+            "Contenido",
+            "Tamaño",
+            "Estado de decodificación",
+            "Correlación",
+            *self._cloud_payload_fields,
+        ]
+        self.onence_history_table.setColumnCount(len(headers))
+        self.onence_history_table.setHorizontalHeaderLabels(headers)
+        for column, field in enumerate(self._cloud_payload_fields, start=8):
+            width = max(
+                100,
+                min(
+                    180,
+                    self.onence_history_table.fontMetrics().horizontalAdvance(field)
+                    + 28,
+                ),
+            )
+            self.onence_history_table.setColumnWidth(column, width)
+        self.onence_history_table.setRowCount(0)
+        for index, message_item in enumerate(self._cloud_messages):
+            self._append_onence_message_row(message_item, index)
+
+    def _toggle_onence_auto_update(self, enabled: bool) -> None:
+        self._cloud_auto_timer.stop()
+        if not enabled:
+            return
+        self._update_onence_auto_interval(self.onence_auto_interval_combo.currentText())
+
+    def _update_onence_auto_interval(self, interval: str) -> None:
+        self._cloud_auto_timer.stop()
+        if not self.onence_auto_check.isChecked():
+            return
+        interval_ms = {
+            "30 segundos": 30_000,
+            "60 segundos": 60_000,
+            "5 minutos": 300_000,
+        }.get(interval)
+        if interval_ms is None:
+            self.onence_history_status_label.setText(
+                "Selecciona un intervalo para activar la actualización automática."
+            )
+            self.onence_auto_check.blockSignals(True)
+            self.onence_auto_check.setChecked(False)
+            self.onence_auto_check.blockSignals(False)
+            return
+        self._cloud_auto_timer.start(interval_ms)
+
+    def _export_onence_messages(self, file_format: str) -> None:
+        if not self._cloud_messages:
+            self.onence_history_status_label.setText("No hay mensajes para exportar.")
+            return
+        extension = "json" if file_format == "json" else "csv"
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar mensajes 1NCE",
+            str(Path.home() / f"onence-history.{extension}"),
+            f"Archivos {extension.upper()} (*.{extension})",
+        )
+        if not filename:
+            return
+        rows = [
+            {
+                "time": message.timestamp_original,
+                "label": self._onence_device_labels.get(
+                    message.iccid or message.device_id, ""
+                ),
+                "iccid": message.iccid,
+                "deviceId": message.device_id,
+                "protocol": message.protocol,
+                "payload": message.payload_original,
+                "payload_decoded": self._decoded_payload_for_export(message),
+                "content_type": message.content_type,
+                "decode_status": message.decode_status,
+                "correlation_status": self._cloud_message_correlation_status(index),
+            }
+            for index, message in enumerate(self._cloud_messages)
+        ]
+        try:
+            if extension == "json":
+                Path(filename).write_text(
+                    json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                with Path(filename).open("w", encoding="utf-8-sig", newline="") as file:
+                    writer = csv.DictWriter(file, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    csv_rows = [
+                        {
+                            **row,
+                            "payload_decoded": json.dumps(
+                                row["payload_decoded"], ensure_ascii=False
+                            ),
+                        }
+                        for row in rows
+                    ]
+                    writer.writerows(csv_rows)
+        except OSError as exc:
+            logger.exception("No se pudo exportar Historian a %s", filename)
+            QMessageBox.critical(
+                self, "Error al exportar", f"No se pudo guardar el archivo.\n{exc}"
+            )
 
     def _build_diagnostic_tab(self) -> QWidget:
         page = QWidget()
@@ -732,7 +1995,7 @@ class MainWindow(QMainWindow):
             self._iot_payload_format = self.iot_format_combo.currentText()
 
         self._iot_flow_action = action
-        self._iot_flow_started_at = datetime.now()
+        self._iot_flow_started_at = datetime.now().astimezone()
         self._iot_flow_responses.clear()
         self._iot_payload_tx_active = False
         self._iot_payload_tx_bytes = 0
@@ -1141,7 +2404,7 @@ class MainWindow(QMainWindow):
                 self._add_event("RX", chunk)
             else:
                 self._process_rx_stream(chunk)
-        now = datetime.now()
+        now = datetime.now().astimezone()
         started = self._iot_flow_started_at or now
         duration_ms = max(0, int((now - started).total_seconds() * 1000))
         rendered = message
@@ -1166,8 +2429,17 @@ class MainWindow(QMainWindow):
                 payload_type=self._iot_payload_format if action == "send" else action,
                 result=rendered,
                 duration_ms=duration_ms,
+                payload=bytes(self._iot_payload) if action == "send" and self._iot_payload else None,
+                device_id=self._diagnostic_values.get("iccid", ""),
+                sequence_id=self._payload_sequence_id(self._iot_payload)
+                if action == "send"
+                else None,
+                successful=success,
             )
         )
+        if hasattr(self, "onence_stats_label"):
+            self._update_onence_statistics()
+            self._render_onence_history_table()
         self._iot_flow_action = None
         self._iot_flow_started_at = None
         self._iot_payload_tx_active = False
@@ -1195,6 +2467,21 @@ class MainWindow(QMainWindow):
         self._update_iot_payload_preview()
         self._update_queue_controls()
 
+    @staticmethod
+    def _payload_sequence_id(payload: bytes | None) -> str | None:
+        if payload is None:
+            return None
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        sequence = data.get("seq")
+        if isinstance(sequence, (str, int)) and not isinstance(sequence, bool):
+            return str(sequence)
+        return None
+
     def _copy_iot_history(self) -> None:
         if not self._iot_history:
             self._append_iot_result("El historial está vacío.")
@@ -1218,10 +2505,15 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         path = Path(filename)
-        records = [
-            {**asdict(record), "timestamp": record.timestamp.isoformat(timespec="seconds")}
-            for record in self._iot_history
-        ]
+        records = []
+        for record in self._iot_history:
+            values = asdict(record)
+            values.pop("payload")
+            values.pop("device_id")
+            values.pop("sequence_id")
+            values.pop("successful")
+            values["timestamp"] = record.timestamp.isoformat(timespec="seconds")
+            records.append(values)
         try:
             if selected_filter.startswith("JSON") or path.suffix.casefold() == ".json":
                 content = json.dumps(records, ensure_ascii=False, indent=2)
@@ -1298,9 +2590,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stop_bits_combo, 0, 10)
         layout.addWidget(QLabel("Flujo"), 1, 0)
         layout.addWidget(self.flow_combo, 1, 1)
-        layout.addWidget(self.connect_button, 1, 2, 1, 2)
-        layout.addWidget(self.status_label, 1, 4, 1, 3)
-        layout.addWidget(self.initialize_at_check, 2, 0, 1, 5)
+        layout.addWidget(self.initialize_at_check, 1, 2, 1, 3)
+        layout.addWidget(self.connect_button, 1, 5, 1, 2)
+        layout.addWidget(self.status_label, 1, 7, 1, 4)
         return group
 
     def _build_monitor_panel(self) -> QGroupBox:
@@ -2199,6 +3491,12 @@ class MainWindow(QMainWindow):
         if success:
             updates = parse_command_response(key, response_lines)
             self._diagnostic_values.update(updates)
+            if (
+                purpose == "diag:iccid"
+                and "iccid" in updates
+                and hasattr(self, "onence_iccid_edit")
+            ):
+                self.onence_iccid_edit.setText(updates["iccid"])
             for field_key, value in updates.items():
                 if field_key in {"imei", "iccid", "imsi"}:
                     continue
@@ -2630,6 +3928,7 @@ class MainWindow(QMainWindow):
                 "iot_prompt_timeout_ms": self.iot_prompt_timeout_spin.value(),
                 "iot_input_time_ms": self.iot_input_time_spin.value(),
                 "iot_response_timeout_ms": self.iot_response_timeout_spin.value(),
+                "onence_iccid": self.onence_iccid_edit.text().strip(),
             }
         )
         save_config(self._config)
@@ -2638,6 +3937,11 @@ class MainWindow(QMainWindow):
         self._command_timeout_timer.stop()
         self._initialization_timer.stop()
         self._automatic_monitor_timer.stop()
+        self._cloud_auto_timer.stop()
+        if self._onence_auth_thread is not None:
+            self._onence_auth_thread.wait(13_000)
+        if self._onence_history_thread is not None:
+            self._onence_history_thread.wait(13_000)
         try:
             self._persist_config()
         except (OSError, ValueError, KeyError) as exc:

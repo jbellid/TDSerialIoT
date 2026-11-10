@@ -55,6 +55,10 @@ class TransmissionRecord:
     payload_type: str
     result: str
     duration_ms: int
+    payload: bytes | None = None
+    device_id: str = ""
+    sequence_id: str | None = None
+    successful: bool = True
 
 
 def encode_payload(
