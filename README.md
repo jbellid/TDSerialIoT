@@ -1,6 +1,8 @@
 # TdSerial IoT
 
-Aplicación de escritorio para Windows orientada al diagnóstico serie de módems IoT. Incluye la **Fase 1** (conexión, monitor TX/RX y comandos AT), la **Fase 2** de diagnóstico, la **Fase 3** de comunicaciones UDP para SIM7080G y la **Fase 4** de consulta de mensajes de 1NCE OS Device Inspector Historian.
+Aplicación de escritorio para Windows orientada al diagnóstico serie y al control remoto de módems IoT. Incluye la **Fase 1** (conexión, monitor TX/RX y comandos AT), la **Fase 2** de diagnóstico, la **Fase 3** de comunicaciones UDP para SIM7080G, la **Fase 4** de consulta de mensajes de 1NCE OS Device Inspector Historian y la **Fase 5** de comunicación bidireccional con una placa de desarrollo mediante la API de 1NCE OS y UDP.
+
+La versión prevista para Git y GitHub Releases es **v2.0.1**.
 
 ## Requisitos
 
@@ -80,7 +82,17 @@ Los tests sustituyen el puerto por un puerto serie simulado y no necesitan una p
 
 El diagnóstico y las operaciones de socket están implementados exclusivamente para SIM7080G; no se incluyen perfiles funcionales para SIM7670G u otros módems. Las pruebas automatizadas no requieren una placa. La compatibilidad real del encuadre CARECV, el transporte binario interactivo a través del puente del ESP32-S3 y la recepción del datagrama en 1NCE deben confirmarse con el hardware y el visor remoto; esta aplicación no afirma una recepción UDP remota sin una confirmación específica del servidor.
 
-## 1NCE Device Controller
+## Fase 5 — Comunicación bidireccional con 1NCE Device Controller
+
+La aplicación envía órdenes remotas mediante la API HTTPS de 1NCE Device Controller; 1NCE las entrega por UDP a la placa, y el firmware puede enviar telemetría y mensajes `command_ack` de vuelta a 1NCE OS. Esos mensajes pueden consultarse en la pestaña **1NCE Cloud** mediante Historian. La comunicación remota no requiere que la placa esté conectada por USB al ordenador.
+
+### Firmware de la placa
+
+En [`sketches/TdSIM7080_1NCE_UDP_v0_6_1.zip`](./sketches/TdSIM7080_1NCE_UDP_v0_6_1.zip) se incluye el firmware **TdSIM7080_1NCE_UDP v0.6.1** para LilyGO T-SIM7080G-S3 con SIM7080G. El archivo comprimido contiene el sketch Arduino, `utilities.h`, un README propio y una imagen de conexiones. Consulta ese README para la preparación de la placa, bibliotecas y configuración; indica Arduino-ESP32 3.x, XPowersLib, DHT sensor library y ArduinoJson 7.x.
+
+Configura un token de comandos propio en el firmware y el mismo token en Device Controller; no publiques tokens reales ni credenciales. Para identificar la SIM en la API, utiliza el **Device ID exacto** de Device Inspector: puede tener una longitud distinta al ICCID comunicado por `AT+CCID`.
+
+### Configuración y envío de órdenes
 
 La pestaña **1NCE Device Controller** funciona sin conexión serie. Configura primero el Client ID y Client Secret en **1NCE Cloud**; el botón **Guardar configuración** de Device Controller también los guarda en el almacén seguro de Windows. La URL debe ser HTTPS y la validación TLS permanece activa. El timeout por defecto es de 30 segundos. **Cerrar sesión** invalida el token local sin borrar las credenciales guardadas.
 
@@ -93,6 +105,8 @@ Selecciona el dispositivo y después una acción para reservar el ID y ver el JS
 Con **Editar comando** puedes modificar el objeto JSON: se conservan sus campos, `********` se sustituye por el token configurado y un token escrito expresamente se envía tal cual. Si `id` contiene `Se asignará al enviar`, se reserva uno nuevo; un ID numérico introducido manualmente se conserva y avanza el contador, pero no se admite reutilizar uno ya reservado. También se solicita confirmación si se escribe `reboot` manualmente. El editor puede mostrar cualquier token que escribas en él; no incluyas secretos si otras personas pueden ver la pantalla.
 
 **SEND_NOW** solicita el envío inmediato; **SEND_WHEN_ACTIVE** lo programa para cuando el dispositivo vuelva a comunicarse. Un HTTP 202 significa que 1NCE aceptó la solicitud, no que el dispositivo la haya recibido o ejecutado. Introduce el ID de acción en **Consultar estado** para ver el estado de 1NCE; incluso `SUCCEEDED` en UDP no confirma la recepción. La columna de ejecución permanece **Sin confirmar**: la correlación automática con `command_ack` de Historian no está implementada.
+
+Para comprobar la respuesta, consulta Historian para el mismo dispositivo y localiza el `command_ack` con el `cmd_id` enviado. En el firmware incluido, `executed` indica ejecución de acciones inmediatas; `accepted` indica aceptación de una tarea diferida, no su finalización. En particular, el ACK de reinicio puede no llegar y no confirma por sí solo que el reinicio se haya completado.
 
 Al pulsar una fila del historial local, su ID de acción se copia al campo de consulta de estado. Si la fila todavía no tiene ID, el campo se vacía para evitar consultar una acción anterior.
 
