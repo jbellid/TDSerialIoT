@@ -1,4 +1,4 @@
-﻿{
+{
   "port": "COM6",
   "baudrate": 115200,
   "bytesize": 8,
@@ -57,6 +57,5 @@
   "iot_read_length": 1460,
   "iot_prompt_timeout_ms": 10000,
   "iot_input_time_ms": 5000,
-  "iot_response_timeout_ms": 30000,
-  "onence_iccid": ""
+  "iot_response_timeout_ms": 30000
 }

@@ -61,9 +61,11 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(config: dict[str, Any]) -> None:
+    # Crear una copia sin el ICCID (nunca se guarda en archivo)
+    config_to_save = {k: v for k, v in config.items() if k != "onence_iccid"}
     try:
         CONFIG_PATH.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            json.dumps(config_to_save, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
     except OSError:

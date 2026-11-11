@@ -75,6 +75,9 @@ from tdserial_iot.onence_api import (
     delete_api_credentials,
     load_api_credentials,
     store_api_credentials,
+    delete_device_iccid,
+    load_device_iccid,
+    store_device_iccid,
 )
 from tdserial_iot.onence_historian import (
     HISTORIAN_MAX_PAGE_SIZE,
@@ -538,12 +541,18 @@ class MainWindow(QMainWindow):
         self.onence_device_mode_combo.currentTextChanged.connect(
             self._onence_device_mode_changed
         )
-        self.onence_iccid_edit = QLineEdit(str(self._config.get("onence_iccid", "")))
+        # Load ICCID from secure credential manager instead of config
+        stored_iccid = ""
+        try:
+            stored_iccid = load_device_iccid() or ""
+        except CredentialStoreError as e:
+            logger.warning("No se pudo cargar el ICCID del almacén seguro: %s", e)
+        self.onence_iccid_edit = QLineEdit(stored_iccid)
         self.onence_iccid_edit.setPlaceholderText("Device ID exacto de Device Inspector")
         self.onence_iccid_edit.setToolTip(
             "Se envía exactamente el identificador escrito; no se quitan dígitos."
         )
-        self.onence_iccid_edit.textChanged.connect(self._persist_config)
+        self.onence_iccid_edit.textChanged.connect(self._persist_iccid_to_secure_store)
         self.onence_device_combo = self._combo([], "")
         self.onence_device_combo.setToolTip("LABEL e ICCID del dispositivo 1NCE.")
         self.onence_device_combo.setEnabled(False)
@@ -3974,6 +3983,27 @@ class MainWindow(QMainWindow):
         for direction, payload, timestamp in self._records[:visible_count]:
             self._append_line(self._format_record(direction, payload, timestamp), direction)
 
+    def _persist_iccid_to_secure_store(self) -> None:
+        """Save the device ICCID to secure credential manager instead of config file."""
+        iccid = self.onence_iccid_edit.text().strip()
+        if not iccid:
+            # If ICCID is empty, delete it from credential manager
+            try:
+                delete_device_iccid()
+            except CredentialStoreError as e:
+                logger.warning("No se pudo eliminar el ICCID del almacén seguro: %s", e)
+        else:
+            # Store the ICCID in the secure credential manager
+            try:
+                store_device_iccid(iccid)
+            except (ValueError, CredentialStoreError) as e:
+                logger.warning("No se pudo guardar el ICCID en el almacén seguro: %s", e)
+                QMessageBox.warning(
+                    self,
+                    "Almacén seguro",
+                    f"No se pudo guardar el ICCID en el almacén seguro de Windows.\n{e}"
+                )
+
     def _persist_config(self) -> None:
         settings = self._serial_settings()
         self._config.update(
@@ -4008,7 +4038,6 @@ class MainWindow(QMainWindow):
                 "iot_prompt_timeout_ms": self.iot_prompt_timeout_spin.value(),
                 "iot_input_time_ms": self.iot_input_time_spin.value(),
                 "iot_response_timeout_ms": self.iot_response_timeout_spin.value(),
-                "onence_iccid": self.onence_iccid_edit.text().strip(),
             }
         )
         save_config(self._config)

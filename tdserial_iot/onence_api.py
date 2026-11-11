@@ -22,6 +22,7 @@ OAUTH_TOKEN_URL = f"{MANAGEMENT_API_BASE_URL}/oauth/token"
 HISTORIAN_DEVICE_HISTORY_PATH = "/v1/inspect/devices/{device_id}/history"
 KEYRING_SERVICE_NAME = "TdSerial IoT - 1NCE OS"
 KEYRING_CREDENTIALS_KEY = "api-credentials"
+KEYRING_ICCID_KEY = "device-iccid"
 HTTP_TIMEOUT_SECONDS = 12
 SAFE_RESPONSE_HEADER_NAMES = frozenset(
     {
@@ -307,3 +308,68 @@ def _http_error_message(status_code: int) -> str:
     if status_code >= 500:
         return "El servicio de autenticación de 1NCE no está disponible temporalmente."
     return f"1NCE rechazó la solicitud de autenticación (HTTP {status_code})."
+
+
+def load_device_iccid() -> str | None:
+    """Load the stored device ICCID from secure Windows Credential Manager.
+    
+    Returns:
+        The device ICCID string if stored, or None if not found.
+        
+    Raises:
+        CredentialStoreError: If the credential store is unavailable.
+    """
+    keyring = _get_keyring()
+    try:
+        iccid = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_ICCID_KEY)
+    except keyring.errors.KeyringError:
+        logger.error("No se pudo leer el ICCID del almacén seguro")
+        raise CredentialStoreError(
+            "No se pudo leer el ICCID del almacén seguro de Windows."
+        ) from None
+    return iccid
+
+
+def store_device_iccid(iccid: str) -> None:
+    """Store the device ICCID in secure Windows Credential Manager.
+    
+    Args:
+        iccid: The device ICCID to store.
+        
+    Raises:
+        ValueError: If the ICCID is empty.
+        CredentialStoreError: If the credential store is unavailable.
+    """
+    if not iccid or not iccid.strip():
+        raise ValueError("El ICCID no puede estar vacío.")
+    
+    keyring = _get_keyring()
+    try:
+        keyring.set_password(
+            KEYRING_SERVICE_NAME,
+            KEYRING_ICCID_KEY,
+            iccid.strip()
+        )
+    except keyring.errors.KeyringError:
+        logger.error("No se pudo guardar el ICCID en el almacén seguro")
+        raise CredentialStoreError(
+            "No se pudo guardar el ICCID en el almacén seguro de Windows."
+        ) from None
+
+
+def delete_device_iccid() -> None:
+    """Delete the stored device ICCID from Windows Credential Manager.
+    
+    Raises:
+        CredentialStoreError: If the credential store is unavailable.
+    """
+    keyring = _get_keyring()
+    try:
+        keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_ICCID_KEY)
+    except keyring.errors.PasswordDeleteError:
+        return
+    except keyring.errors.KeyringError:
+        logger.error("No se pudo eliminar el ICCID del almacén seguro")
+        raise CredentialStoreError(
+            "No se pudo eliminar el ICCID del almacén seguro de Windows."
+        ) from None
