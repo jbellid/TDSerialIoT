@@ -1,4 +1,4 @@
-# TdSerial IoT v2.1.0 - Ejecutable para Windows
+aplicación# TdSerial IoT v2.1.1 - Ejecutable para Windows
 
 ## 📦 Contenido del Archivo
 
@@ -22,7 +22,7 @@ Este archivo contiene la aplicación TdSerial IoT completamente preparada para e
 - **Espacio en disco**: ~200 MB
 - **Conectividad**: Puerto serial USB disponible (para dispositivos 1NCE)
 
-## ✨ Características v2.1.0
+## ✨ Características v2.1.1
 
 - ✅ Almacenamiento seguro de credenciales en Windows Credential Manager
 - ✅ ICCID del dispositivo guardado de forma segura (NO en archivos de configuración)
@@ -32,7 +32,7 @@ Este archivo contiene la aplicación TdSerial IoT completamente preparada para e
 
 ## 🔒 Seguridad
 
-**Importante**: A partir de v2.1.0, todas las credenciales sensibles se almacenan de forma segura:
+**Importante**: A partir de v2.1.1, todas las credenciales sensibles se almacenan de forma segura:
 - Las credenciales de API se guardan en **Windows Credential Manager** (encriptadas)
 - El ICCID del dispositivo se almacena de forma segura (NO en config.json)
 - Los archivos de configuración JSON nunca contienen datos sensibles
