@@ -2,15 +2,42 @@
 
 Aplicación de escritorio para Windows orientada al diagnóstico serie y al control remoto de módems IoT. Incluye la **Fase 1** (conexión, monitor TX/RX y comandos AT), la **Fase 2** de diagnóstico, la **Fase 3** de comunicaciones UDP para SIM7080G, la **Fase 4** de consulta de mensajes de 1NCE OS Device Inspector Historian y la **Fase 5** de comunicación bidireccional con una placa de desarrollo mediante la API de 1NCE OS y UDP.
 
-La versión prevista para Git y GitHub Releases es **v2.0.1**.
+## Versión Actual
+
+**v2.1.0** — Versión de distribución con seguridad mejorada y ejecutable standalone.
+
+### Cambios en v2.1.0
+
+- 🔐 **Almacenamiento seguro**: ICCID del dispositivo ahora se almacena en Windows Credential Manager (encriptado) en lugar de config.json
+- 📦 **Ejecutable standalone**: Disponible como `.exe` independiente sin necesidad de Python instalado
+- ✅ **Auditoría de seguridad**: Repositorio limpiado de secrets, historial verificado
+- 📚 **Documentación completa**: Guías de compilación, distribución y seguridad
 
 ## Requisitos
 
-- Windows 10/11.
-- Python 3.12 o superior.
-- Dependencias indicadas en `requirements.txt`.
+### Para Usuarios Finales (Ejecutable v2.1.0)
+
+- **Windows 10/11** (64-bit)
+- **USB serial port** disponible
+- **Ejecutable TdSerialIoT.exe** (descargar de [Releases](https://github.com/jbellid/TDSerialIoT/releases))
+- ❌ **NO requiere Python** — todas las dependencias incluidas
+
+### Para Desarrolladores (Compilación desde código)
+
+- Windows 10/11
+- Python 3.12 o superior
+- Dependencias indicadas en `requirements.txt`
 
 ## Instalación
+
+### Opción 1: Ejecutable Standalone (Recomendado para Usuarios)
+
+1. Descargar `TdSerialIoT_v2.1.0_Windows.zip` desde [Releases](https://github.com/jbellid/TDSerialIoT/releases)
+2. Descomprimir en la carpeta deseada
+3. Ejecutar `TdSerialIoT.exe` (doble clic)
+4. ¡Listo! No requiere instalación adicional
+
+### Opción 2: Desde Código Fuente (Desarrolladores)
 
 Desde PowerShell, en la carpeta del proyecto:
 
@@ -24,6 +51,14 @@ También se puede ejecutar `run_app.bat`; este crea el entorno virtual e instala
 El lanzador y el punto de entrada Python configuran las rutas de plugins de Qt desde la instalación local de PySide6 para evitar conflictos con rutas Qt del sistema.
 
 ## Ejecución y uso
+
+### Desde Ejecutable (v2.1.0)
+
+```
+TdSerialIoT.exe
+```
+
+### Desde Código Fuente
 
 ```powershell
 .\.venv\Scripts\python.exe -m tdserial_iot.main
