@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import csv
+import sqlite3
 from email.utils import parsedate_to_datetime
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -51,6 +52,7 @@ from tdserial_iot.command_queue import (
     QueueEvent,
     make_at_command,
 )
+from tdserial_iot.controller_panel import ControllerPanel
 from tdserial_iot.iot_operations import (
     UDP_MAX_PAYLOAD_BYTES,
     TransmissionRecord,
@@ -447,6 +449,25 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_diagnostic_tab(), "Diagnóstico IoT")
         self.tabs.addTab(self._build_communications_tab(), "Comunicaciones IoT")
         self.tabs.addTab(self._build_onence_cloud_tab(), "1NCE Cloud")
+        try:
+            self.controller_panel: ControllerPanel | None = ControllerPanel(
+                self._onence_credentials_from_fields
+            )
+        except (OSError, sqlite3.Error) as exc:
+            logger.error("No se pudo abrir el almacenamiento de Device Controller: %s", exc)
+            self.controller_panel = None
+            self.tabs.addTab(
+                QLabel("No se pudo abrir el almacenamiento local de Device Controller. Consulta el log."),
+                "1NCE Device Controller",
+            )
+        else:
+            controller_scroll = QScrollArea()
+            controller_scroll.setWidgetResizable(True)
+            controller_scroll.setWidget(self.controller_panel)
+            self.controller_panel.refresh_devices_requested.connect(
+                self._refresh_controller_cloud_devices
+            )
+            self.tabs.addTab(controller_scroll, "1NCE Device Controller")
         root.addWidget(self.tabs, 1)
         self.setCentralWidget(central)
 
@@ -880,6 +901,15 @@ class MainWindow(QMainWindow):
         )
         thread.start()
 
+    def _refresh_controller_cloud_devices(self) -> None:
+        if self.controller_panel is None:
+            return
+        self._start_onence_devices_refresh()
+        if self._onence_devices_thread is None:
+            self.controller_panel._show_error(self.onence_history_status_label.text())
+        else:
+            self.controller_panel._log(self.onence_history_status_label.text())
+
     @Slot(bool, object, str)
     def _on_onence_devices_completed(
         self, success: bool, result: object, message: str
@@ -888,6 +918,8 @@ class MainWindow(QMainWindow):
         if not success or not isinstance(result, tuple):
             self.onence_history_status_label.setText(message)
             logger.warning("No se pudieron actualizar los dispositivos 1NCE: %s", message)
+            if self.controller_panel is not None:
+                self.controller_panel._log(f"ERROR al actualizar dispositivos: {message}")
             return
         previous_iccid = self.onence_device_combo.currentData()
         self.onence_device_combo.clear()
@@ -918,6 +950,9 @@ class MainWindow(QMainWindow):
         else:
             status = f"Dispositivos actualizados: {len(seen_iccids)}."
         self.onence_history_status_label.setText(status)
+        if self.controller_panel is not None:
+            self.controller_panel.set_cloud_devices(list(self._onence_device_labels.items()))
+            self.controller_panel._log(status)
         if self._cloud_messages:
             self._render_onence_history_table()
 
@@ -3979,6 +4014,12 @@ class MainWindow(QMainWindow):
         save_config(self._config)
 
     def closeEvent(self, event: Any) -> None:
+        if self.controller_panel is not None and self.controller_panel.thread is not None:
+            QMessageBox.warning(
+                self, "Device Controller", "Espera a que termine la operación HTTP antes de cerrar."
+            )
+            event.ignore()
+            return
         self._command_timeout_timer.stop()
         self._initialization_timer.stop()
         self._automatic_monitor_timer.stop()

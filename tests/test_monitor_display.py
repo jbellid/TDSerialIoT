@@ -606,6 +606,11 @@ def test_onence_device_selector_keeps_duplicate_labels_and_iccid_fallback(
         assert window.onence_device_combo.itemData(0) == "iccid-1"
         assert window.onence_device_combo.itemData(1) == "iccid-2"
         assert window.onence_device_combo.itemText(2) == "iccid-3"
+        assert window.controller_panel is not None
+        assert window.controller_panel.cloud_devices.count() == 4
+        assert window.controller_panel.cloud_devices.itemData(1) == "iccid-1"
+        assert window.controller_panel.cloud_devices.itemData(2) == "iccid-2"
+        assert window.controller_panel.cloud_devices.itemText(3) == "iccid-3"
 
         window._cloud_messages = [
             onence_historian_module.parse_cloud_message(
@@ -643,6 +648,47 @@ def test_onence_device_selector_keeps_duplicate_labels_and_iccid_fallback(
         assert window.onence_history_table.item(0, 2).text() == "iccid-1"
         assert window.onence_history_table.item(1, 1).text() == "iccid-3"
         assert window.onence_history_table.item(0, 6).text().startswith("JSON válido")
+    finally:
+        window.close()
+
+
+def test_controller_refresh_button_loads_cloud_devices_without_serial(qt_app, monkeypatch):
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: None)
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator, "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient, "get_device_iccids",
+        lambda self: ("1234567890123456789",),
+    )
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient, "get_sim_labels",
+        lambda self: {"1234567890123456789": "Equipo"},
+    )
+    window = MainWindow()
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        assert window.controller_panel is not None
+        window.controller_panel.refresh_devices_button.click()
+        loop = QEventLoop()
+        poll = QTimer()
+        poll.setInterval(10)
+        poll.timeout.connect(
+            lambda: loop.quit()
+            if window._onence_devices_thread is None
+            and window.controller_panel.cloud_devices.count() == 2
+            else None
+        )
+        poll.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        poll.stop()
+        assert window.controller_panel.cloud_devices.itemData(1) == "1234567890123456789"
+        assert "Equipo" in window.controller_panel.cloud_devices.itemText(1)
+        assert not window._is_connected
     finally:
         window.close()
 

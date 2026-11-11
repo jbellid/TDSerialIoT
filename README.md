@@ -80,6 +80,26 @@ Los tests sustituyen el puerto por un puerto serie simulado y no necesitan una p
 
 El diagnóstico y las operaciones de socket están implementados exclusivamente para SIM7080G; no se incluyen perfiles funcionales para SIM7670G u otros módems. Las pruebas automatizadas no requieren una placa. La compatibilidad real del encuadre CARECV, el transporte binario interactivo a través del puente del ESP32-S3 y la recepción del datagrama en 1NCE deben confirmarse con el hardware y el visor remoto; esta aplicación no afirma una recepción UDP remota sin una confirmación específica del servidor.
 
+## 1NCE Device Controller
+
+La pestaña **1NCE Device Controller** funciona sin conexión serie. Configura primero el Client ID y Client Secret en **1NCE Cloud**; el botón **Guardar configuración** de Device Controller también los guarda en el almacén seguro de Windows. La URL debe ser HTTPS y la validación TLS permanece activa. El timeout por defecto es de 30 segundos. **Cerrar sesión** invalida el token local sin borrar las credenciales guardadas.
+
+Añade un dispositivo con nombre, ICCID/Device ID exacto, modelo, puerto UDP (normalmente 3000), observaciones y token del firmware. El token debe tener al menos 16 bytes y se guarda en el almacén seguro, no en la configuración ni en el historial. Los metadatos, contadores y el historial se guardan en `%LOCALAPPDATA%\TdSerialIoT\device-controller.sqlite3`; contienen identificadores de dispositivos y deben tratarse como datos privados.
+
+En la fila del ICCID, **Actualizar dispositivos** consulta el inventario de la cuenta en 1NCE, igual que en Cloud. El selector muestra LABEL e ICCID cuando están disponibles; si no hay LABEL, muestra el ICCID. Al elegir un dispositivo aún no guardado localmente, completa sus datos y token y pulsa **Guardar dispositivo** antes de enviar.
+
+Selecciona el dispositivo y después una acción para reservar el ID y ver el JSON con el token oculto. Revisa la vista previa y pulsa **Enviar comando**. Para una primera prueba elige **Encender LED** (`led_on`). También se admiten `led_off`, `led_toggle`, `buzzer` (500 ms), `telemetry`, `gps`, `status` y `reboot`; el reinicio exige confirmación. GNSS puede interrumpir temporalmente la conectividad celular. Los ID se conservan entre sesiones y se limita el JSON a los 400 bytes admitidos por el firmware v0.6.1.
+
+Con **Editar comando** puedes modificar el objeto JSON: se conservan sus campos, `********` se sustituye por el token configurado y un token escrito expresamente se envía tal cual. Si `id` contiene `Se asignará al enviar`, se reserva uno nuevo; un ID numérico introducido manualmente se conserva y avanza el contador, pero no se admite reutilizar uno ya reservado. También se solicita confirmación si se escribe `reboot` manualmente. El editor puede mostrar cualquier token que escribas en él; no incluyas secretos si otras personas pueden ver la pantalla.
+
+**SEND_NOW** solicita el envío inmediato; **SEND_WHEN_ACTIVE** lo programa para cuando el dispositivo vuelva a comunicarse. Un HTTP 202 significa que 1NCE aceptó la solicitud, no que el dispositivo la haya recibido o ejecutado. Introduce el ID de acción en **Consultar estado** para ver el estado de 1NCE; incluso `SUCCEEDED` en UDP no confirma la recepción. La columna de ejecución permanece **Sin confirmar**: la correlación automática con `command_ack` de Historian no está implementada.
+
+Al pulsar una fila del historial local, su ID de acción se copia al campo de consulta de estado. Si la fila todavía no tiene ID, el campo se vacía para evitar consultar una acción anterior.
+
+Las operaciones HTTP se ejecutan fuera del hilo de la interfaz. Si una petición falla por red o timeout, su resultado puede ser desconocido: comprueba el historial y el dispositivo antes de volver a enviar, especialmente `led_toggle` y `reboot`. No hay cancelación de una petición HTTP en curso; antes de cerrar hay que esperar su finalización o timeout. Comprueba credenciales y permisos ante HTTP 401/403, ICCID ante 404 y límites de la cuenta ante 429.
+
+Ante HTTP 404 al enviar, comprueba también la URL base y que el **Device ID** seleccionado coincida exactamente con el de Device Inspector de la cuenta autenticada. Puede diferir del ICCID leído por el módem; la aplicación no elimina dígitos automáticamente. Un 404 por sí solo no permite determinar cuál de esos recursos no se ha encontrado.
+
 ## Fase 4 — 1NCE OS Device Inspector Historian
 
 La pestaña **1NCE Cloud** funciona independientemente de COM6. Usa HTTPS con validación TLS, autenticación OAuth en `https://api.1nce.com/management-api/oauth/token`, HTTP Basic y el cuerpo JSON `{"grant_type":"client_credentials"}`. El botón **Probar conexión** comprueba la autenticación; los permisos de Historian se comprueban al consultar.
