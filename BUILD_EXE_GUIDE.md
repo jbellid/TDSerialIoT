@@ -37,7 +37,7 @@ pip install pyinstaller
 pip install -r requirements.txt
 
 # 4. Compilar
-pyinstaller tdserial_iot.spec --windowed --noconfirm
+pyinstaller tdserial_iot.spec 
 
 # 5. Desactivar entorno virtual
 .venv\Scripts\deactivate.bat
@@ -51,12 +51,18 @@ dist/
     ├── TdSerialIoT.exe          ← Ejecutable principal
     ├── config.json              ← Configuración base
     ├── _internal/               ← Dependencias (PySide6, pyserial, etc.)
+    │   ├── TdSerialIoT.ico      ← Icono de la ventana y de la aplicación
     │   ├── PySide6/
     │   ├── serial/
     │   ├── keyring/
     │   └── ...
     └── ... (otros archivos)
 ```
+
+El icono del ejecutable se establece en `tdserial_iot.spec`. Para la ventana,
+la aplicación carga además el icono incluido como recurso por PyInstaller.
+Distribuye la carpeta completa y no únicamente el `.exe`. Si el icono no se
+puede cargar, se registra un aviso en el log de la aplicación.
 
 ## 🚀 Distribución a Usuarios
 

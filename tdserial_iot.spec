@@ -13,23 +13,28 @@ a = Analysis(
     datas=[
         ('tdserial_iot', 'tdserial_iot'),
         ('config.json', '.'),
+        ('TdSerialIoT.ico', '.'),  # ✓ Incluir el icono
     ],
     hiddenimports=[
-        'PySide6',
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
+        'PySide6.QtSerialPort',
         'serial',
-        'pyserial',
         'keyring',
         'keyring.backends.windows',
+        'logging',
+        'json',
     ],
     hookspath=[],
-    hooksconfig={},
+    hooksconfig={
+        'PySide6': {
+            'collect_all': True,
+        }
+    },
     runtime_hooks=[],
     excludedimports=[],
     win_no_prefer_redirects=False,
-    win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )

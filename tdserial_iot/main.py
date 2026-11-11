@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 import PySide6
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+import tdserial_iot
 from tdserial_iot.logging_setup import configure_logging
 from tdserial_iot.main_window import MainWindow
+
+
+def application_icon_path() -> Path:
+    return Path(tdserial_iot.__file__).resolve().parent.parent / "TdSerialIoT.ico"
 
 
 def configure_qt_plugin_paths() -> None:
@@ -32,6 +39,13 @@ def main() -> int:
     configure_qt_plugin_paths()
     application = QApplication(sys.argv)
     application.setApplicationName("TdSerial IoT")
+    icon_path = application_icon_path()
+    app_icon = QIcon(str(icon_path))
+    if app_icon.isNull():
+        logging.getLogger(__name__).warning("No se pudo cargar el icono: %s", icon_path)
+    else:
+        application.setWindowIcon(app_icon)
+
     window = MainWindow()
     window.show()
     return application.exec()

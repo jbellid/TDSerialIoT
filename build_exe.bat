@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM Script to build TdSerial IoT executable with PyInstaller
 REM Usage: build_exe.bat
 
@@ -74,7 +75,7 @@ echo Step 4: Compilando ejecutable con PyInstaller...
 echo   (Esto puede tomar 2-5 minutos la primera vez)
 echo.
 
-pyinstaller tdserial_iot.spec --windowed --noconfirm
+pyinstaller tdserial_iot.spec 
 if errorlevel 1 (
     echo Error al compilar con PyInstaller
     pause
