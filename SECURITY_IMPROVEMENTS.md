@@ -2,7 +2,7 @@
 
 ## Resumen
 
-A partir de la versión con el commit `7cda1f6`, el identificador del dispositivo **ICCID** ya **no se guarda en el archivo `config.json`** del repositorio.
+A partir de la versión v2.1.0, el identificador del dispositivo **ICCID** ya **no se guarda en el archivo `config.json`** del repositorio.
 
 ## Cambios Implementados
 
@@ -18,7 +18,7 @@ A partir de la versión con el commit `7cda1f6`, el identificador del dispositiv
 iccid = load_device_iccid()  # Returns: str | None
 
 # Guardar el ICCID de forma segura
-store_device_iccid("89882280666800025342")  # Raises: ValueError, CredentialStoreError
+store_device_iccid("******************")  # Raises: ValueError, CredentialStoreError
 
 # Eliminar el ICCID almacenado
 delete_device_iccid()  # Raises: CredentialStoreError
