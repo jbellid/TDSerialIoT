@@ -4,7 +4,12 @@ Aplicación de escritorio para Windows orientada al diagnóstico serie y al cont
 
 ## Versión Actual
 
-**v2.1.0** — Versión de distribución con seguridad mejorada y ejecutable standalone.
+**v2.2.0** — Correlación de ACK de Historian con comandos de Device Controller.
+
+### Cambios en v2.2.0
+
+- Correlación de ACK al consultar Historian, con estado y fecha persistentes.
+- Distinción entre el estado de la API y lo que informa el dispositivo.
 
 ### Cambios en v2.1.0
 
@@ -15,7 +20,7 @@ Aplicación de escritorio para Windows orientada al diagnóstico serie y al cont
 
 ## Requisitos
 
-### Para Usuarios Finales (Ejecutable v2.1.0)
+### Para Usuarios Finales (Ejecutable)
 
 - **Windows 10/11** (64-bit)
 - **USB serial port** disponible
@@ -32,7 +37,7 @@ Aplicación de escritorio para Windows orientada al diagnóstico serie y al cont
 
 ### Opción 1: Ejecutable Standalone (Recomendado para Usuarios)
 
-1. Descargar `TdSerialIoT_v2.1.0_Windows.zip` desde [Releases](https://github.com/jbellid/TDSerialIoT/releases)
+1. Descargar una versión disponible desde [Releases](https://github.com/jbellid/TDSerialIoT/releases)
 2. Descomprimir en la carpeta deseada
 3. Ejecutar `TdSerialIoT.exe` (doble clic)
 4. ¡Listo! No requiere instalación adicional
@@ -52,7 +57,7 @@ El lanzador y el punto de entrada Python configuran las rutas de plugins de Qt d
 
 ## Ejecución y uso
 
-### Desde Ejecutable (v2.1.0)
+### Desde Ejecutable
 
 ```
 TdSerialIoT.exe
@@ -123,7 +128,7 @@ La aplicación envía órdenes remotas mediante la API HTTPS de 1NCE Device Cont
 
 ### Firmware de la placa
 
-En [`sketches/TdSIM7080_1NCE_UDP_v0_6_1.zip`](./sketches/TdSIM7080_1NCE_UDP_v0_6_1.zip) se incluye el firmware **TdSIM7080_1NCE_UDP v0.6.1** para LilyGO T-SIM7080G-S3 con SIM7080G. El archivo comprimido contiene el sketch Arduino, `utilities.h`, un README propio y una imagen de conexiones. Consulta ese README para la preparación de la placa, bibliotecas y configuración; indica Arduino-ESP32 3.x, XPowersLib, DHT sensor library y ArduinoJson 7.x.
+En [`sketches/TdSIM7080_1NCE_UDP_v0_6_2.zip`](./sketches/TdSIM7080_1NCE_UDP_v0_6_2.zip) se incluye el firmware **TdSIM7080_1NCE_UDP v0.6.2** para LilyGO T-SIM7080G-S3 con SIM7080G. El archivo comprimido contiene el sketch Arduino, `utilities.h`, un README propio y una imagen de conexiones. Consulta ese README para la preparación de la placa, bibliotecas y configuración; indica Arduino-ESP32 3.x, XPowersLib, DHT sensor library y ArduinoJson 7.x.
 
 Configura un token de comandos propio en el firmware y el mismo token en Device Controller; no publiques tokens reales ni credenciales. Para identificar la SIM en la API, utiliza el **Device ID exacto** de Device Inspector: puede tener una longitud distinta al ICCID comunicado por `AT+CCID`.
 
@@ -135,13 +140,19 @@ Añade un dispositivo con nombre, ICCID/Device ID exacto, modelo, puerto UDP (no
 
 En la fila del ICCID, **Actualizar dispositivos** consulta el inventario de la cuenta en 1NCE, igual que en Cloud. El selector muestra LABEL e ICCID cuando están disponibles; si no hay LABEL, muestra el ICCID. Al elegir un dispositivo aún no guardado localmente, completa sus datos y token y pulsa **Guardar dispositivo** antes de enviar.
 
-Selecciona el dispositivo y después una acción para reservar el ID y ver el JSON con el token oculto. Revisa la vista previa y pulsa **Enviar comando**. Para una primera prueba elige **Encender LED** (`led_on`). También se admiten `led_off`, `led_toggle`, `buzzer` (500 ms), `telemetry`, `gps`, `status` y `reboot`; el reinicio exige confirmación. GNSS puede interrumpir temporalmente la conectividad celular. Los ID se conservan entre sesiones y se limita el JSON a los 400 bytes admitidos por el firmware v0.6.1.
+Selecciona el dispositivo y después una acción para reservar el ID y ver el JSON con el token oculto. Revisa la vista previa y pulsa **Enviar comando**. Para una primera prueba elige **Encender LED** (`led_on`). También se admiten `led_off`, `led_toggle`, `buzzer` (500 ms), `telemetry`, `gps`, `status` y `reboot`; el reinicio exige confirmación. GNSS puede interrumpir temporalmente la conectividad celular. Los ID se conservan entre sesiones y se limita el JSON a los 400 bytes admitidos por el firmware v0.6.2.
 
 Con **Editar comando** puedes modificar el objeto JSON: se conservan sus campos, `********` se sustituye por el token configurado y un token escrito expresamente se envía tal cual. Si `id` contiene `Se asignará al enviar`, se reserva uno nuevo; un ID numérico introducido manualmente se conserva y avanza el contador, pero no se admite reutilizar uno ya reservado. También se solicita confirmación si se escribe `reboot` manualmente. El editor puede mostrar cualquier token que escribas en él; no incluyas secretos si otras personas pueden ver la pantalla.
 
-**SEND_NOW** solicita el envío inmediato; **SEND_WHEN_ACTIVE** lo programa para cuando el dispositivo vuelva a comunicarse. Un HTTP 202 significa que 1NCE aceptó la solicitud, no que el dispositivo la haya recibido o ejecutado. Introduce el ID de acción en **Consultar estado** para ver el estado de 1NCE; incluso `SUCCEEDED` en UDP no confirma la recepción. La columna de ejecución permanece **Sin confirmar**: la correlación automática con `command_ack` de Historian no está implementada.
+**SEND_NOW** solicita el envío inmediato; **SEND_WHEN_ACTIVE** lo programa para cuando el dispositivo vuelva a comunicarse. Un HTTP 202 significa que 1NCE aceptó la solicitud, no que el dispositivo la haya recibido o ejecutado. Introduce el ID de acción en **Consultar estado** para ver el estado de 1NCE; incluso `SUCCEEDED` en UDP no confirma la recepción.
 
-Para comprobar la respuesta, consulta Historian para el mismo dispositivo y localiza el `command_ack` con el `cmd_id` enviado. En el firmware incluido, `executed` indica ejecución de acciones inmediatas; `accepted` indica aceptación de una tarea diferida, no su finalización. En particular, el ACK de reinicio puede no llegar y no confirma por sí solo que el reinicio se haya completado.
+Al consultar Historian en **1NCE Cloud**, cada página recibida se contrasta con el historial local de Device Controller, sin generar consultas adicionales. Se busca un `command_ack` con Device ID/ICCID exacto, `cmd_id` y `cmd` correspondientes, y fecha válida. Si Historian proporciona `deviceId` e `iccid` distintos, el mensaje no se correlaciona automáticamente. La fecha del ACK puede preceder hasta dos minutos al envío para tolerar pequeños desajustes de reloj. Los comandos antiguos sin zona horaria se interpretan en la zona local del equipo. Las respuestas JSON en Base64 también se admiten.
+
+El historial de Device Controller muestra y exporta las fechas sin desplazamiento horario, sin convertir la hora; el valor original se conserva en la base de datos y se puede ver al pasar el ratón sobre la fecha. Si Historian no incluye zona, la coincidencia del identificador y el comando es evidencia, pero no se puede verificar con precisión el orden temporal. Se descartan únicamente fechas anteriores al envío para cualquier desplazamiento horario posible, con la tolerancia indicada. No se asigna UTC ni la zona del ordenador a la fecha de Historian.
+
+La columna **Ejecución** muestra **Aceptado por el dispositivo**, **Ejecutado según dispositivo** o **Correlación ambigua**, y **Fecha ACK** conserva la fecha del primer ACK asociado. El estado y la fecha se guardan en la base de datos y se incluyen en las exportaciones CSV. IDs locales duplicados, un comando distinto o estados contradictorios se marcan ambiguos; los comandos personalizados no se confirman automáticamente. Si no se encuentra un ACK válido, se mantiene **Sin confirmar**, lo que no demuestra pérdida o fallo: revisa dispositivo, filtros, fechas, paginación y la retención de Historian. Los IDs son locales a esta instalación y podrían reutilizarse en otro equipo o tras perder la base de datos; una coincidencia no garantiza unicidad global ni autentica criptográficamente el origen del ACK.
+
+En el firmware incluido, `executed` informa de ejecución de acciones inmediatas; `accepted` indica aceptación de una tarea diferida, no su finalización. En particular, el ACK de reinicio puede no llegar y no confirma por sí solo que el reinicio se haya completado.
 
 Al pulsar una fila del historial local, su ID de acción se copia al campo de consulta de estado. Si la fila todavía no tiene ID, el campo se vacía para evitar consultar una acción anterior.
 

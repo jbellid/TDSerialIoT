@@ -13,8 +13,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from tdserial_iot.onence_historian import CloudMessage, render_payload
 
 DEFAULT_BASE_URL = "https://api.1nce.com/management-api"
 COMMANDS = frozenset(
@@ -72,10 +75,15 @@ class ControllerStore:
                     iccid TEXT NOT NULL, name TEXT NOT NULL, command TEXT NOT NULL,
                     command_id INTEGER NOT NULL, action_id TEXT NOT NULL DEFAULT '',
                     mode TEXT NOT NULL, api_status TEXT NOT NULL,
-                    execution_status TEXT NOT NULL DEFAULT 'Sin confirmar'
+                    execution_status TEXT NOT NULL DEFAULT 'Sin confirmar',
+                    ack_timestamp TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(history)")}
+            if "ack_timestamp" not in columns:
+                db.execute("ALTER TABLE history ADD COLUMN ack_timestamp TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE INDEX IF NOT EXISTS history_device_command ON history(iccid, command_id)")
 
     def devices(self) -> list[tuple[Any, ...]]:
         with sqlite3.connect(self.path) as db:
@@ -144,8 +152,86 @@ class ControllerStore:
         with sqlite3.connect(self.path) as db:
             return db.execute(
                 "SELECT record_id,created,iccid,name,command,command_id,action_id,mode,"
-                "api_status,execution_status FROM history ORDER BY record_id DESC"
+                "api_status,execution_status,ack_timestamp FROM history ORDER BY record_id DESC"
             ).fetchall()
+
+    def correlate_acks(self, messages: list[CloudMessage] | tuple[CloudMessage, ...]) -> int:
+        """Persist only identifiable, time-consistent command acknowledgements."""
+        changed: set[int] = set()
+        with sqlite3.connect(self.path) as db:
+            for message in messages:
+                identifiers = {value for value in (message.device_id, message.iccid) if value}
+                if len(identifiers) != 1 or message.timestamp is None:
+                    continue
+                try:
+                    payload = json.loads(render_payload(message, "JSON"))
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict) or payload.get("event") != "command_ack":
+                    continue
+                command_id = payload.get("cmd_id")
+                command = payload.get("cmd")
+                status = payload.get("status")
+                if (
+                    not isinstance(command_id, int) or isinstance(command_id, bool)
+                    or not 1 <= command_id <= MAX_ID
+                    or not isinstance(command, str) or not command
+                    or status not in ("accepted", "executed")
+                ):
+                    continue
+                rows = db.execute(
+                    "SELECT record_id,created,command,execution_status,ack_timestamp "
+                    "FROM history WHERE iccid=? AND command_id=?",
+                    (next(iter(identifiers)), command_id),
+                ).fetchall()
+                if not rows:
+                    continue
+                for record_id, created, recorded_command, previous, previous_time in rows:
+                    try:
+                        created_time = datetime.fromisoformat(created).astimezone(timezone.utc)
+                    except (ValueError, OverflowError):
+                        continue
+                    has_timezone = message.timestamp.utcoffset() is not None
+                    if has_timezone:
+                        latest_possible_ack = message.timestamp.astimezone(timezone.utc)
+                    else:
+                        # Without an offset, UTC could be up to 12 hours ahead of the displayed time.
+                        latest_possible_ack = message.timestamp.replace(tzinfo=timezone.utc) + timedelta(hours=12)
+                    if latest_possible_ack < created_time - timedelta(minutes=2):
+                        continue
+                    if recorded_command == "Personalizado":
+                        continue
+                    new_status = (
+                        "Aceptado por el dispositivo"
+                        if status == "accepted"
+                        else "Ejecutado según dispositivo"
+                    )
+                    uncertain_status = new_status + " (fecha sin zona)"
+                    if not has_timezone:
+                        new_status = uncertain_status
+                    compatible = {"Sin confirmar", new_status, uncertain_status}
+                    if not has_timezone:
+                        compatible.add(uncertain_status.removesuffix(" (fecha sin zona)"))
+                    if (
+                        len(rows) != 1 or command != recorded_command
+                        or previous == "Correlación ambigua"
+                        or previous not in compatible
+                    ):
+                        new_status = "Correlación ambigua"
+                    elif not has_timezone and previous == uncertain_status.removesuffix(" (fecha sin zona)"):
+                        new_status = previous
+                    timestamp = (
+                        message.timestamp_original
+                        if has_timezone and previous == uncertain_status and new_status != "Correlación ambigua"
+                        else previous_time or message.timestamp_original
+                    )
+                    if (new_status, timestamp) != (previous, previous_time):
+                        db.execute(
+                            "UPDATE history SET execution_status=?,ack_timestamp=? WHERE record_id=?",
+                            (new_status, timestamp, record_id),
+                        )
+                        changed.add(record_id)
+        return len(changed)
 
     def get_setting(self, key: str, default: str) -> str:
         with sqlite3.connect(self.path) as db:

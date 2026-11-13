@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 
@@ -10,6 +11,7 @@ import tdserial_iot.controller_panel as panel_module
 from tdserial_iot.controller_core import ControllerStore
 from tdserial_iot.main import configure_qt_plugin_paths
 from tdserial_iot.onence_api import ApiCredentials
+from tdserial_iot.onence_historian import parse_cloud_message
 
 
 def test_remote_command_preview_send_and_persistence(tmp_path, monkeypatch):
@@ -49,7 +51,7 @@ def test_remote_command_preview_send_and_persistence(tmp_path, monkeypatch):
         assert sent[0] == (iccid, 3000, "SEND_NOW", {"cmd": "led_on", "id": 1, "token": "test-token-123456"})
         history = store.history()[0]
         assert history[6] == "request123"
-        assert history[8:] == ("HTTP 202 aceptado", "Sin confirmar")
+        assert history[8:] == ("HTTP 202 aceptado", "Sin confirmar", "")
         assert "test-token-123456" not in str(history)
         assert app is QApplication.instance()
     finally:
@@ -206,6 +208,44 @@ def test_history_columns_fit_content_and_click_copies_action(panel_setup, monkey
     assert item_without_action is not None
     QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=table.visualItemRect(item_without_action).center())
     assert panel.action_id.text() == ""
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("2026-11-13T11:47:03+01:00", "2026-11-13T11:47:03"),
+    ("2026-11-13T10:47:03-05:30", "2026-11-13T10:47:03"),
+    ("2026-11-13T11:47:19.300Z", "2026-11-13T11:47:19.300"),
+    ("2026-11-13T11:47:19.300", "2026-11-13T11:47:19.300"),
+    ("", ""),
+])
+def test_history_date_display_preserves_wall_time(value, expected):
+    assert panel_module._display_history_date(value) == expected
+
+
+def test_history_table_copy_and_csv_hide_offsets_and_uncertainty(panel_setup, monkeypatch, tmp_path):
+    panel, store, iccid, _, app = panel_setup
+    store.record("2026-11-13T11:47:03+01:00", iccid, "Device", "led_toggle", 75, "SEND_NOW")
+    ack = parse_cloud_message({
+        "deviceId": iccid, "time": "2026-11-13T11:47:19.300", "protocol": "UDP",
+        "payload": '{"event":"command_ack","cmd_id":75,"cmd":"led_toggle","status":"executed"}',
+    })
+    store.correlate_acks([ack])
+    panel._refresh_history()
+    assert panel.history_table.item(0, 0).text() == "2026-11-13T11:47:03"
+    assert panel.history_table.item(0, 0).toolTip() == "2026-11-13T11:47:03+01:00"
+    assert panel.history_table.item(0, 7).text() == "Ejecutado según dispositivo"
+    assert panel.history_table.item(0, 8).text() == "2026-11-13T11:47:19.300"
+    panel._copy()
+    copied = app.clipboard().text().split("\t")
+    assert copied[0] == "2026-11-13T11:47:03"
+    assert copied[8:] == ["Ejecutado según dispositivo", "2026-11-13T11:47:19.300"]
+    path = tmp_path / "history.csv"
+    monkeypatch.setattr(panel_module.QFileDialog, "getSaveFileName", lambda *_args: (str(path), "CSV"))
+    panel._export()
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.reader(file))
+    assert rows[1] == copied
+    assert store.history()[0][1] == "2026-11-13T11:47:03+01:00"
+    assert store.history()[0][9] == "Ejecutado según dispositivo (fecha sin zona)"
 
 
 def test_custom_placeholder_id_and_literal_token_are_sent(panel_setup, monkeypatch):

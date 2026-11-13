@@ -1,4 +1,4 @@
-# Generación y Distribución de Ejecutable - TdSerial IoT v2.1.0
+# Generación y Distribución de Ejecutable - TdSerial IoT v2.2.0
 
 ## 📦 Cómo Generar el Ejecutable
 
@@ -71,7 +71,7 @@ puede cargar, se registra un aviso en el log de la aplicación.
 ```bash
 # Comprimir toda la carpeta
 # Usuarios descargan y descomprimen
-dist/TdSerialIoT/ → TdSerialIoT_v2.1.0.zip
+dist/TdSerialIoT/ → TdSerialIoT_v2.2.0.zip
 ```
 
 **Ventajas:**
@@ -80,7 +80,7 @@ dist/TdSerialIoT/ → TdSerialIoT_v2.1.0.zip
 - Solo descomprimir y ejecutar
 
 **Pasos para el usuario:**
-1. Descargar `TdSerialIoT_v2.1.0.zip`
+1. Descargar `TdSerialIoT_v2.2.0.zip`
 2. Descomprimir en `C:\Programas\` (o donde prefiera)
 3. Ejecutar `TdSerialIoT.exe`
 
@@ -95,7 +95,7 @@ Para crear un instalador `.exe`, se puede usar NSIS:
 ```
 
 Esto crearía:
-- `TdSerialIoT_v2.1.0_setup.exe` (instalador)
+- `TdSerialIoT_v2.2.0_setup.exe` (instalador)
 - Acceso directo en Inicio
 - Desinstalador
 
@@ -105,8 +105,8 @@ Subir el ejecutable a las **releases de GitHub**:
 
 ```bash
 # En https://github.com/jbellid/TdSerialIoT/releases
-# 1. Crear nuevo release: v2.1.0
-# 2. Subir archivo: TdSerialIoT_v2.1.0.zip
+# 1. Crear nuevo release: v2.2.0
+# 2. Subir archivo: TdSerialIoT_v2.2.0.zip
 # 3. Publicar con notas de cambio
 ```
 
@@ -143,13 +143,13 @@ Para generar ejecutable de nueva versión:
 ```bash
 # 1. Actualizar versión en tdserial_iot/__init__.py
 # 2. Hacer commit y crear tag
-git tag -a v2.1.1 -m "Version 2.1.1"
+git tag -a v2.2.0 -m "Version 2.2.0"
 
 # 3. Generar ejecutable
 build_exe.bat
 
 # 4. Comprimir
-# dist/TdSerialIoT → TdSerialIoT_v2.1.1.zip
+# dist/TdSerialIoT → TdSerialIoT_v2.2.0.zip
 
 # 5. Crear release en GitHub
 # https://github.com/jbellid/TdSerialIoT/releases/new

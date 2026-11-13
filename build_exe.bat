@@ -5,7 +5,7 @@ REM Usage: build_exe.bat
 
 echo.
 echo ╔════════════════════════════════════════════════════════════╗
-echo ║   BUILDING TdSerial IoT v2.1.0 EXECUTABLE                 ║
+echo ║   BUILDING TdSerial IoT v2.2.0 EXECUTABLE                 ║
 echo ╚════════════════════════════════════════════════════════════╝
 echo.
 
@@ -102,7 +102,7 @@ echo   1. Prueba el ejecutable:
 echo      dist\TdSerialIoT\TdSerialIoT.exe
 echo.
 echo   2. Para distribuir, comprime la carpeta:
-echo      dist\TdSerialIoT -> TdSerialIoT_v2.1.0.zip
+echo      dist\TdSerialIoT -> TdSerialIoT_v2.2.0.zip
 echo.
 echo   3. Los usuarios pueden descargar y ejecutar directamente
 echo      sin necesidad de instalar Python.

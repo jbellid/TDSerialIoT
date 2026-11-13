@@ -652,6 +652,86 @@ def test_onence_device_selector_keeps_duplicate_labels_and_iccid_fallback(
         window.close()
 
 
+def test_historian_results_update_controller_history_and_table(qt_app, monkeypatch, tmp_path):
+    from tdserial_iot.controller_core import ControllerStore
+
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: None)
+    window = MainWindow()
+    try:
+        panel = window.controller_panel
+        assert panel is not None
+        panel.store = ControllerStore(tmp_path / "controller.sqlite3")
+        iccid = "1234567890123456789"
+        panel.store.record("2026-11-13T10:00:00+00:00", iccid, "Device", "led_on", 7, "SEND_NOW")
+        ack = onence_historian_module.parse_cloud_message({
+            "iccid": iccid, "time": "2026-11-13T10:01:00Z", "protocol": "UDP",
+            "payload": '{"event":"command_ack","cmd_id":7,"cmd":"led_on","status":"executed"}',
+        })
+        window._on_onence_history_completed(True, onence_historian_module.HistoryPage((ack,), None), "")
+        assert panel.history_table.item(0, 7).text() == "Ejecutado según dispositivo"
+        assert panel.history_table.item(0, 8).text() == "2026-11-13T10:01:00"
+        assert panel.history_table.item(0, 8).toolTip() == "2026-11-13T10:01:00Z"
+        window._on_onence_history_completed(True, onence_historian_module.HistoryPage((), None), "")
+        assert panel.history_table.item(0, 7).text() == "Ejecutado según dispositivo"
+        window._cloud_query_append = True
+        conflicting = onence_historian_module.parse_cloud_message({
+            "iccid": iccid, "time": "2026-11-13T10:02:00Z", "protocol": "UDP",
+            "payload": '{"event":"command_ack","cmd_id":7,"cmd":"led_on","status":"accepted"}',
+        })
+        window._on_onence_history_completed(
+            True, onence_historian_module.HistoryPage((conflicting,), None), ""
+        )
+        assert panel.history_table.item(0, 7).text() == "Correlación ambigua"
+    finally:
+        window.close()
+
+
+def test_historian_reports_correlation_database_error(qt_app, monkeypatch, tmp_path):
+    import sqlite3
+    from tdserial_iot.controller_core import ControllerStore
+
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: None)
+    window = MainWindow()
+    try:
+        panel = window.controller_panel
+        assert panel is not None
+        panel.store = ControllerStore(tmp_path / "controller.sqlite3")
+
+        def fail(_messages):
+            raise sqlite3.OperationalError("database unavailable")
+
+        monkeypatch.setattr(panel.store, "correlate_acks", fail)
+        window._on_onence_history_completed(True, onence_historian_module.HistoryPage((), None), "")
+        assert "no se pudo guardar la correlación" in window.onence_history_status_label.text()
+    finally:
+        window.close()
+
+
+def test_historian_base64_ack_without_timezone_updates_controller_table(qt_app, monkeypatch, tmp_path):
+    from tdserial_iot.controller_core import ControllerStore
+
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: None)
+    window = MainWindow()
+    try:
+        panel = window.controller_panel
+        assert panel is not None
+        panel.store = ControllerStore(tmp_path / "controller.sqlite3")
+        iccid = "1234567890123456789"
+        panel.store.record("2026-11-13T11:47:03+01:00", iccid, "Device", "led_toggle", 75, "SEND_NOW")
+        ack = onence_historian_module.parse_cloud_message({
+            "iccid": iccid, "deviceId": iccid, "time": "2026-11-13T11:47:19.300", "protocol": "UDP",
+            "payload": "eyJpZCI6InRkc2ltNzA4MC0wMSIsImV2ZW50IjoiY29tbWFuZF9hY2siLCJjbWRfaWQiOjc1LCJzdGF0dXMiOiJleGVjdXRlZCIsImNtZCI6ImxlZF90b2dnbGUiLCJsZWQiOnRydWV9",
+        })
+        window._on_onence_history_completed(True, onence_historian_module.HistoryPage((ack,), None), "")
+        assert panel.history_table.item(0, 7).text() == "Ejecutado según dispositivo"
+        assert panel.history_table.item(0, 8).text() == "2026-11-13T11:47:19.300"
+    finally:
+        window.close()
+
+
 def test_controller_refresh_button_loads_cloud_devices_without_serial(qt_app, monkeypatch):
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
     monkeypatch.setattr(main_window_module, "save_config", lambda config: None)

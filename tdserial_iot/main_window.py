@@ -1157,12 +1157,22 @@ class MainWindow(QMainWindow):
         self._cloud_next_token = page.next_token
         self._cloud_history_complete = page.next_token is None
         self._render_onence_history_table()
+        correlation_error = False
+        if self.controller_panel is not None:
+            try:
+                self.controller_panel.store.correlate_acks(page.messages)
+                self.controller_panel._refresh_history()
+            except sqlite3.Error:
+                logger.exception("No se pudo guardar la correlación de ACK de Historian")
+                correlation_error = True
         self.onence_last_query_label.setText(
             "Última consulta: "
             + datetime.now().astimezone().strftime("%d/%m/%Y %H:%M:%S")
         )
         self.onence_history_status_label.setText(
-            "Consulta correcta; no hay mensajes en el intervalo."
+            "Consulta correcta, pero no se pudo guardar la correlación de ACK; consulta el log."
+            if correlation_error
+            else "Consulta correcta; no hay mensajes en el intervalo."
             if not self._cloud_messages
             else (
                 f"History actualizado: {len(page.messages)} mensaje(s) "

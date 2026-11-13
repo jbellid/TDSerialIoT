@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,27 @@ from tdserial_iot.onence_api import ApiCredentials, CredentialStoreError, store_
 
 KEYRING_SERVICE = "TdSerial IoT - Device Controller"
 logger = logging.getLogger(__name__)
+
+
+def _display_history_date(value: str) -> str:
+    if not value:
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        logger.warning("Fecha no válida en el historial de Device Controller: %s", value)
+        return value
+    if parsed.utcoffset() is None:
+        return value
+    return re.sub(r"(?:Z|[+-]\d{2}(?::?\d{2})?(?::?\d{2}(?:\.\d+)?)?)$", "", value)
+
+
+def _display_history_row(row: tuple[Any, ...]) -> tuple[Any, ...]:
+    values = list(row[1:])
+    values[0] = _display_history_date(values[0])
+    values[8] = values[8].removesuffix(" (fecha sin zona)")
+    values[9] = _display_history_date(values[9])
+    return tuple(values)
 
 
 class ControllerWorker(QObject):
@@ -161,10 +183,10 @@ class ControllerPanel(QWidget):
 
         history_group = QGroupBox("Historial local")
         history_layout = QVBoxLayout(history_group)
-        self.history_table = QTableWidget(0, 8)
+        self.history_table = QTableWidget(0, 9)
         self.history_table.setMinimumHeight(200)
         self.history_table.setHorizontalHeaderLabels(
-            ["Fecha", "Dispositivo", "Comando", "ID comando", "ID acción", "Modo", "Estado API", "Ejecución"]
+            ["Fecha", "Dispositivo", "Comando", "ID comando", "ID acción", "Modo", "Estado API", "Ejecución", "Fecha ACK"]
         )
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.history_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -172,6 +194,8 @@ class ControllerPanel(QWidget):
         header = self.history_table.horizontalHeader()
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
         self.history_table.cellClicked.connect(self._select_history_action)
         history_layout.addWidget(self.history_table)
         self.action_id = QLineEdit()
@@ -465,7 +489,7 @@ class ControllerPanel(QWidget):
             port = self.port.value()
             history_command = command if command in COMMANDS else "Personalizado"
             self.pending_record = self.store.record(
-                datetime.now().isoformat(timespec="seconds"), str(iccid), self.name.text(),
+                datetime.now().astimezone().isoformat(timespec="seconds"), str(iccid), self.name.text(),
                 history_command, command_id, mode,
             )
             self._refresh_history()
@@ -489,8 +513,12 @@ class ControllerPanel(QWidget):
         rows = self.store.history()
         self.history_table.setRowCount(len(rows))
         for index, row in enumerate(rows):
-            for column, value in enumerate((row[1], f"{row[3]} · {row[2]}", *row[4:])):
+            values = _display_history_row(row)
+            for column, value in enumerate((values[0], f"{values[2]} · {values[1]}", *values[3:])):
                 self.history_table.setItem(index, column, QTableWidgetItem(str(value)))
+            for column, original in ((0, row[1]), (8, row[10])):
+                if original:
+                    self.history_table.item(index, column).setToolTip(str(original))
 
     @Slot(int, int)
     def _select_history_action(self, row: int, column: int) -> None:
@@ -499,7 +527,9 @@ class ControllerPanel(QWidget):
 
     def _copy(self) -> None:
         rows = self.store.history()
-        QApplication.clipboard().setText("\n".join("\t".join(str(value) for value in row[1:]) for row in rows))
+        QApplication.clipboard().setText(
+            "\n".join("\t".join(str(value) for value in _display_history_row(row)) for row in rows)
+        )
 
     def _export(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(self, "Exportar historial", str(Path.home() / "controller.csv"), "CSV (*.csv)")
@@ -508,7 +538,7 @@ class ControllerPanel(QWidget):
         try:
             with open(filename, "w", newline="", encoding="utf-8-sig") as file:
                 writer = csv.writer(file)
-                writer.writerow(("Fecha", "ICCID", "Nombre", "Comando", "ID comando", "ID acción", "Modo", "Estado API", "Ejecución"))
-                writer.writerows(row[1:] for row in self.store.history())
+                writer.writerow(("Fecha", "ICCID", "Nombre", "Comando", "ID comando", "ID acción", "Modo", "Estado API", "Ejecución", "Fecha ACK"))
+                writer.writerows(_display_history_row(row) for row in self.store.history())
         except OSError as exc:
             self._show_error(f"No se pudo exportar el historial: {exc}")
