@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 import serial
@@ -11,12 +12,21 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 logger = logging.getLogger(__name__)
 
 
+def _create_serial(**settings: Any) -> serial.Serial:
+    if sys.platform == "win32":
+        from tdserial_iot.serial_windows import SerialWithoutInputPurge
+
+        return SerialWithoutInputPurge(**settings)
+    return serial.Serial(**settings)
+
+
 class SerialWorker(QObject):
     received = Signal(bytes)
     transmitted = Signal(bytes)
     connection_changed = Signal(bool)
     error_occurred = Signal(str)
     stopped = Signal()
+    buffer_read = Signal(bytes)
 
     def __init__(self) -> None:
         super().__init__()
@@ -40,7 +50,7 @@ class SerialWorker(QObject):
             port_name,
         )
         try:
-            port = serial.Serial(
+            port = _create_serial(
                 port=None,
                 baudrate=int(settings["baudrate"]),
                 bytesize=int(settings["bytesize"]),
@@ -71,6 +81,20 @@ class SerialWorker(QObject):
         self._port = port
         self._log_line_states("después de abrir", port)
         logger.info("Puerto serie abierto: %s (%s baudios)", port.port, port.baudrate)
+        try:
+            if settings.get("clear_buffer", False):
+                port.reset_input_buffer()
+                logger.info("Buffer de entrada limpiado al conectar")
+            else:
+                available = port.in_waiting
+                buffered_data = port.read(available) if available else b""
+                logger.info("Buffer disponible tras la apertura: %d bytes", len(buffered_data))
+                if buffered_data:
+                    self.buffer_read.emit(buffered_data)
+        except (serial.SerialException, OSError) as exc:
+            self._handle_port_error("Error al procesar el buffer de entrada", exc)
+            return
+
         self.connection_changed.emit(True)
 
     @Slot(bytes)

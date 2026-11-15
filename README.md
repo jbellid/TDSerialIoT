@@ -4,7 +4,13 @@ Aplicación de escritorio para Windows orientada al diagnóstico serie y al cont
 
 ## Versión Actual
 
-**v2.2.0** — Correlación de ACK de Historian con comandos de Device Controller.
+**v2.3.0** — Lectura del buffer serie disponible al conectar.
+
+### Cambios en v2.3.0
+
+- Conservación y visualización como **BUFFER** de los datos disponibles al abrir el puerto serie en Windows, cuando el dispositivo y el controlador los conservan.
+- Casilla **Limpiar buffer** para descartar la entrada disponible al conectar; la preferencia se guarda entre sesiones.
+- Lectura posterior como RX y notificación de errores durante el procesamiento inicial.
 
 ### Cambios en v2.2.0
 
@@ -55,6 +61,32 @@ py -3 -m venv .venv
 También se puede ejecutar `run_app.bat`; este crea el entorno virtual e instala dependencias si aún no existe `.venv`.
 El lanzador y el punto de entrada Python configuran las rutas de plugins de Qt desde la instalación local de PySide6 para evitar conflictos con rutas Qt del sistema.
 
+## 🔧 Sketches Arduino para LilyGO SIM7080G-S3
+
+La carpeta `sketches/` contiene dos paquetes Arduino para programar la placa de desarrollo **LilyGO SIM7080G-S3**:
+
+### ATBridge
+Sketch para comunicación directa con el módem SIM7080G. Permite:
+- Enviar comandos AT sin procesar al módulo SIM7080G
+- Recibir respuestas en tiempo real
+- Útil para diagnóstico, testing y validación de configuración del módem
+- **Uso**: Abrir en Arduino IDE y cargar en la placa SIM7080G-S3
+
+### 1NCE_UDP
+Sketch para testing y conexión bidireccional con la **plataforma 1NCE OS**. Incluye:
+- Comunicación UDP con el servidor 1NCE OS
+- Configuración de contexto APN y socket
+- Envío y recepción de payloads JSON
+- **Uso**: Desarrollar y validar integraciones IoT antes de usar TdSerial IoT
+- **Recomendación**: Usar primero ATBridge para validar la conectividad del módem, luego 1NCE_UDP para las comunicaciones 1NCE OS
+
+Para usar estos sketches:
+1. Conectar la placa LilyGO SIM7080G-S3 por USB al ordenador
+2. Abrir **Arduino IDE**
+3. Seleccionar la placa: **ESP32-S3 Dev Module** (o similar, depende de la versión)
+4. Cargar el sketch correspondiente desde `sketches/`
+5. Abrir el **Monitor Serie** (115200 baudios) para ver los registros
+
 ## Ejecución y uso
 
 ### Desde Ejecutable
@@ -73,11 +105,15 @@ La configuración inicial es COM6, 115200 baudios, 8 bits, sin paridad, 1 bit de
 
 La conexión serie usa apertura explícita de pyserial: crea el objeto sin abrir, solicita DTR=False, RTS=False y BREAK=False, desactiva XON/XOFF, RTS/CTS y DSR/DTR, y después abre el puerto. El log técnico registra los estados solicitados y consultados antes y después de abrir, además de las operaciones de apertura/cierre. Aun así, Windows o el controlador USB pueden cambiar brevemente las líneas durante la apertura física; la aplicación no puede garantizar que el dispositivo no observe ese transitorio.
 
+Al conectar, los bytes disponibles inmediatamente después de la apertura se muestran como **BUFFER**; los que llegan posteriormente aparecen como **RX**. La casilla **Limpiar buffer** descarta los bytes de entrada disponibles al conectar en vez de mostrarlos; su estado se guarda en `config.json`. En Windows se evita el vaciado automático que hace pySerial al abrir para conservar lo que el controlador tenga disponible. La recuperación de comunicaciones enviadas antes de conectar depende del dispositivo y del controlador: no está garantizada si estos las descartaron o si su buffer se llenó. La marca **BUFFER** indica cuándo se leyeron los bytes, no cuándo se transmitieron.
+
 Al conectar se activa por defecto el **modo pasivo**: solo se inicia la recepción y el estado indica **Puerto conectado — modo pasivo**. No se envían comandos AT, no se ejecuta ATE0, no se inicia diagnóstico ni se activa monitorización. Los comandos manuales están disponibles inmediatamente. Para optar por la inicialización, marca antes de conectar **Inicializar comunicación AT al conectar**; entonces la aplicación espera 10 segundos para dejar terminar el arranque del firmware LilyGO y ejecuta `AT` seguido de `ATE0` por la cola serie, esperando la respuesta terminal de cada comando. El timeout o error cancela el resto de esa inicialización. Esta preferencia se guarda en `config.json` y está desactivada de forma predeterminada.
 
 El campo de comandos acepta varias líneas pegadas: cada línea no vacía es un comando independiente. La cola transmite solo uno a la vez y espera líneas completas `OK`, `ERROR`, `+CME ERROR` o `+CMS ERROR`; los ecos, respuestas parciales y URC intercalados no la adelantan. `AT+CAOPEN` requiere tanto `OK` como el URC `+CAOPEN` del mismo identificador de conexión, en cualquier orden. El timeout por comando se configura en segundos (1–600, predeterminado 10). Si vence, la secuencia se pausa y exige **Reanudar** para continuar; una respuesta tardía no libera la cola pausada. **Al encontrar error** permite elegir **Detener** (predeterminado), **Continuar** o **Preguntar**. El monitor indica el comando actual y los contadores de comandos ejecutados, pendientes, completados y fallidos. **Cancelar secuencia** descarta los comandos pendientes, pero deja terminar la operación actual; no se cierra ni se interrumpe el puerto serie. La interacción prompt/payload de `AT+CASEND` está disponible en la pestaña Comunicaciones IoT. Enter envía el contenido; Shift+Enter inserta una línea al editar manualmente. El contador indica los bytes totales y el número de comandos. Las flechas arriba/abajo recorren el historial. Para transmitir un carácter o texto sin tratarlo como un comando AT, activa **Enviar texto/caracteres sin terminación**: se envían exactamente los bytes UTF-8 escritos, sin CR/LF y sin esperar una respuesta terminal; no puede intercalarse con una secuencia AT activa. El TX aparece cuando el puerto confirma los bytes escritos y las respuestas recibidas continúan mostrándose como RX. La casilla **Activar/desactivar eco** envía `ATE1` al marcarse y `ATE0` al desmarcarse, usando la misma cola serie. El monitor permite pausar solo la visualización (la recepción continúa), autoscroll, limpiar, copiar, guardar y cambiar entre ASCII y HEX. La casilla **Mostrar caracteres especiales y tamaño (bytes)** está desmarcada por defecto: desmarcada, omite los bytes de control/no ASCII y el contador de tamaño del monitor; marcada, muestra los controles como símbolos visibles (por ejemplo, CR como `␍`, LF como `␊`) y añade el tamaño TX/RX en bytes. Al alternarla, el monitor se regenera con la vista elegida, incluidos los registros anteriores. Las preferencias de timeout, política de error y parámetros de Comunicaciones IoT se guardan en `config.json`.
 
 Los parámetros convencionales se pasan al controlador serie tal como se seleccionan. Algunos puertos USB Serial/JTAG pueden no admitir o reflejar todos los ajustes; la aplicación informa de errores sin intentar modificar parámetros del módem. Las comunicaciones serie se realizan desde un único hilo de trabajo para no bloquear la interfaz.
+
+La [guía de compilación](docs/BUILD_EXE_GUIDE.md), las [notas de seguridad](docs/SECURITY_IMPROVEMENTS.md) y el [historial de la funcionalidad de buffer](docs/BUFFER_FEATURE_COMPLETE.md) se encuentran en `docs`.
 
 ## Diagnóstico IoT SIM7080G
 

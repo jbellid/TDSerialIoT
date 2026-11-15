@@ -70,6 +70,36 @@ def test_display_checkbox_redraws_existing_records(qt_app, monkeypatch):
     assert saved_config[-1]["show_special_characters_and_size"] is False
 
 
+def test_buffer_control_and_rendering(qt_app, monkeypatch):
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    saved_config = []
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: saved_config.append(config.copy()))
+    window = MainWindow()
+    try:
+        assert not window.clear_buffer_check.isChecked()
+        assert window._serial_settings()["clear_buffer"] is False
+        window._clear_console()
+        window._on_buffer_read(b"ABC\r\n")
+        assert "BUFFER" in window.console.toPlainText()
+        assert "ABC" in window.console.toPlainText()
+        window._on_buffer_read(b"first\r\nsecond\r\n")
+        assert "BUFFER 📦 first\n" in window.console.toPlainText()
+        assert "BUFFER 📦 second\n" in window.console.toPlainText()
+        window.show_details_check.setChecked(True)
+        assert "ABC␍␊ (5 bytes)" in window.console.toPlainText()
+        window.display_combo.setCurrentText("HEX")
+        assert "41 42 43 0D 0A" in window.console.toPlainText()
+        window.clear_buffer_check.setChecked(True)
+        assert window._serial_settings()["clear_buffer"] is True
+        window._on_connection_changed(True)
+        assert not window.clear_buffer_check.isEnabled()
+        window._on_connection_changed(False)
+        assert window.clear_buffer_check.isEnabled()
+    finally:
+        window.close()
+    assert saved_config[-1]["clear_buffer_on_connect"] is True
+
+
 def test_multiline_input_sends_one_command_until_terminal_response(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())

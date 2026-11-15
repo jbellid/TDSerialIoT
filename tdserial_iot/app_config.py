@@ -21,6 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "stopbits": 1,
     "flow_control": "Ninguno",
     "initialize_at_on_connect": False,
+    "clear_buffer_on_connect": False,
     "autoscroll": True,
     "display_format": "ASCII",
     "show_special_characters_and_size": False,

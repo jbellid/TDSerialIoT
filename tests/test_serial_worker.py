@@ -58,7 +58,7 @@ class FakeSerial:
 @pytest.fixture
 def worker(monkeypatch):
     FakeSerial.instances.clear()
-    monkeypatch.setattr("tdserial_iot.serial_worker.serial.Serial", FakeSerial)
+    monkeypatch.setattr("tdserial_iot.serial_worker._create_serial", FakeSerial)
     instance = SerialWorker()
     tx_events = []
     rx_events = []
@@ -134,7 +134,7 @@ def test_port_open_failure_is_reported(monkeypatch):
         return OpenFailureSerial(**settings)
 
     FakeSerial.instances.clear()
-    monkeypatch.setattr("tdserial_iot.serial_worker.serial.Serial", fail_open)
+    monkeypatch.setattr("tdserial_iot.serial_worker._create_serial", fail_open)
     instance = SerialWorker()
     errors = []
     statuses = []

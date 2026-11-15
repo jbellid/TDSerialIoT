@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         "RX": QColor("#58a6ff"),
         "ERROR": QColor("#ff6b6b"),
         "SYSTEM": QColor("#d2a8ff"),
+        "BUFFER": QColor("#ffa500"),
     }
 
     def __init__(self) -> None:
@@ -418,6 +419,7 @@ class MainWindow(QMainWindow):
         self.stop_requested.connect(self._worker.stop, Qt.ConnectionType.QueuedConnection)
         self._worker.received.connect(self._on_received)
         self._worker.transmitted.connect(self._on_transmitted)
+        self._worker.buffer_read.connect(self._on_buffer_read)
         self._worker.connection_changed.connect(self._on_connection_changed)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.stopped.connect(
@@ -2634,6 +2636,16 @@ class MainWindow(QMainWindow):
             "Desactivado: conexión pasiva, sin comandos AT. Activado: espera "
             "10 segundos para que finalice el arranque LilyGO y ejecuta AT y ATE0 por la cola serie."
         )
+        self.clear_buffer_check = QCheckBox("Limpiar buffer")
+        self.clear_buffer_check.setObjectName("toolbarCheck")
+        self.clear_buffer_check.setChecked(
+            bool(self._config.get("clear_buffer_on_connect", False))
+        )
+        self.clear_buffer_check.setToolTip(
+            "Desmarcado: muestra los bytes disponibles justo después de abrir. "
+            "Marcado: descarta los bytes de entrada disponibles al conectar. "
+            "La recuperación de datos anteriores depende del dispositivo y del controlador."
+        )
         self.status_label = QLabel("● Desconectado")
         self.status_label.setObjectName("disconnectedStatus")
 
@@ -2650,7 +2662,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stop_bits_combo, 0, 10)
         layout.addWidget(QLabel("Flujo"), 1, 0)
         layout.addWidget(self.flow_combo, 1, 1)
-        layout.addWidget(self.initialize_at_check, 1, 2, 1, 3)
+        layout.addWidget(self.initialize_at_check, 1, 2, 1, 2)
+        layout.addWidget(self.clear_buffer_check, 1, 4, 1, 1)
         layout.addWidget(self.connect_button, 1, 5, 1, 2)
         layout.addWidget(self.status_label, 1, 7, 1, 4)
         return group
@@ -2846,6 +2859,7 @@ class MainWindow(QMainWindow):
             "xonxoff": flow == "XON/XOFF",
             "rtscts": flow == "RTS/CTS",
             "dsrdtr": flow == "DSR/DTR",
+            "clear_buffer": self.clear_buffer_check.isChecked(),
         }
 
     def _toggle_connection(self) -> None:
@@ -2871,6 +2885,7 @@ class MainWindow(QMainWindow):
         self._connecting = True
         self.connect_button.setEnabled(False)
         self.initialize_at_check.setEnabled(False)
+        self.clear_buffer_check.setEnabled(False)
         self.open_requested.emit(settings)
 
     def _on_connection_changed(self, connected: bool) -> None:
@@ -2967,6 +2982,7 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(True)
         self.connect_button.setText("Desconectar" if connected else "Conectar")
         self.initialize_at_check.setEnabled(not connected)
+        self.clear_buffer_check.setEnabled(not connected)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self._add_event("SYSTEM", b"Puerto serie conectado" if connected else b"Puerto serie desconectado")
@@ -3058,6 +3074,10 @@ class MainWindow(QMainWindow):
                 self._add_event("RX", chunk)
                 continue
             self._process_rx_stream(chunk)
+
+    def _on_buffer_read(self, data: bytes) -> None:
+        for line in data.splitlines(keepends=True):
+            self._add_event("BUFFER", line)
 
     def _process_rx_stream(self, data: bytes) -> None:
         for line in self._rx_line_buffer.feed(data):
@@ -3917,8 +3937,8 @@ class MainWindow(QMainWindow):
             content = payload.hex(" ").upper()
         else:
             content = self._visible_ascii(payload, show_special_characters=show_details)
-        marker = {"TX": "→", "RX": "←"}.get(direction, "·")
-        size = f" ({len(payload)} bytes)" if show_details and direction in {"TX", "RX"} else ""
+        marker = {"TX": "→", "RX": "←", "BUFFER": "📦"}.get(direction, "·")
+        size = f" ({len(payload)} bytes)" if show_details and direction in {"TX", "RX", "BUFFER"} else ""
         return f"[{stamp}] {direction} {marker} {content}{size}"
 
     @staticmethod
@@ -4025,6 +4045,7 @@ class MainWindow(QMainWindow):
                 "stopbits": settings["stopbits"],
                 "flow_control": settings["flow_control"],
                 "initialize_at_on_connect": self.initialize_at_check.isChecked(),
+                "clear_buffer_on_connect": self.clear_buffer_check.isChecked(),
                 "autoscroll": self.autoscroll_check.isChecked(),
                 "display_format": self.display_combo.currentText(),
                 "show_special_characters_and_size": self.show_details_check.isChecked(),
