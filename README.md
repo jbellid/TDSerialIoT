@@ -158,6 +158,35 @@ Los tests sustituyen el puerto por un puerto serie simulado y no necesitan una p
 
 El diagnóstico y las operaciones de socket están implementados exclusivamente para SIM7080G; no se incluyen perfiles funcionales para SIM7670G u otros módems. Las pruebas automatizadas no requieren una placa. La compatibilidad real del encuadre CARECV, el transporte binario interactivo a través del puente del ESP32-S3 y la recepción del datagrama en 1NCE deben confirmarse con el hardware y el visor remoto; esta aplicación no afirma una recepción UDP remota sin una confirmación específica del servidor.
 
+## Fase 4 — 1NCE OS Device Inspector Historian
+
+La pestaña **1NCE Cloud** funciona independientemente de COM6. Usa HTTPS con validación TLS, autenticación OAuth en `https://api.1nce.com/management-api/oauth/token`, HTTP Basic y el cuerpo JSON `{"grant_type":"client_credentials"}`. El botón **Probar conexión** comprueba la autenticación; los permisos de Historian se comprueban al consultar.
+
+Las credenciales solo se guardan o borran por acción explícita del usuario en el almacén de credenciales de Windows mediante `keyring`; no se incluyen en `config.json` ni en las exportaciones. El token permanece en memoria y se renueva antes de caducar; no se muestra ni se registra. Los fallos de autenticación, permisos, red, timeout y límite de solicitudes se presentan sin incluir secretos.
+
+Hay tres modos de consulta: **Todos los dispositivos** usa `GET /v1/inspect/devices/history` sin ICCID; **Seleccionar dispositivo** carga el inventario de `GET /v1/inspect/devices` y cruza los ICCID con los LABEL de `GET /v1/sims`; e **ICCID manual** mantiene la consulta directa `GET /v1/inspect/devices/{deviceId}/history`. LABEL repetidos no se consideran identificadores únicos: el selector muestra cada LABEL junto con su ICCID. Si no hay LABEL o falla la consulta de metadatos SIM, se puede seguir seleccionando el dispositivo por ICCID. **Actualizar dispositivos** vuelve a cargar esa correspondencia en memoria.
+
+Los tres modos admiten filtros de fechas y protocolo (UDP, CoAP o LwM2M) y paginación. Al lanzar una consulta, **Hasta** se actualiza a la hora actual para todos los periodos salvo **Personalizado**; **Últimos 7 días** también recalcula **Desde** dentro del límite de retención. Historian limita cada página a 25 mensajes; **Recuperar todos** respeta el límite total configurable y se detiene ante tokens repetidos. La lista de dispositivos y los metadatos SIM también tienen límites de paginación. Las páginas de mensajes se combinan sin duplicados. La casilla **Actualización automática** utiliza el mismo estilo visual que **Monitorización automática** de Diagnóstico IoT, no se solapa con una consulta en curso y respeta `Retry-After` ante HTTP 429. **Última consulta** se actualiza al iniciar cada petición y al completar correctamente la respuesta; así también se ve la hora de un intento que termina con error. Las fechas con zona se normalizan para mostrarse en hora local; las fechas sin zona se mantienen como tales, sin asumir UTC.
+
+La tabla muestra fecha y hora, LABEL, ICCID, protocolo, contenido, tamaño y estado de decodificación; los objetos JSON también se despliegan en columnas dinámicas por propiedad. La tabla y el detalle conservan el payload original y ofrecen representaciones como JSON, texto, HEX y Base64. Para payloads que llegan codificados en Base64, la representación JSON intenta también decodificar el contenido seleccionado, aunque el protocolo no active la decodificación automática. Las estadísticas distinguen los registros devueltos en la consulta del total histórico (no asumido), y presentan UDP, última fecha y correlación con transmisiones locales. La correlación prioriza `seq` si el JSON ya lo contiene; no se altera automáticamente el contenido enviado. Como alternativa, se compara payload y tiempo en una ventana aproximada de cinco minutos. Coincidencias duplicadas se marcan ambiguas; la ausencia de coincidencia solo significa que no aparece en el periodo consultado y no demuestra pérdida. Un `OK` AT tampoco confirma recepción remota.
+
+Los mensajes se pueden copiar y exportar como CSV o JSON. El ICCID y el Device ID se muestran y exportan completos.
+
+Para diagnosticar solicitudes, `logs/tdserial-iot.log` registra método, URL completa, parámetros, código HTTP, duración, una lista permitida de cabeceras de respuesta y el cuerpo de error de 1NCE con valores sensibles redactados. No registra Client Secret, access token, Authorization ni Basic. En el modo global la URL no incluye ICCID; las consultas por dispositivo envían el Device ID exactamente como lo devuelve el inventario o como se introduce manualmente, sin quitar dígitos. El ICCID obtenido mediante `AT+CCID` puede diferir en longitud del Device ID de Device Inspector.
+
+La integración real se puede probar sin iniciar la GUI ni conectar COM6. Guarda antes las credenciales en el almacén seguro desde la pestaña **1NCE Cloud** y pasa el Device ID exacto que funcionó en PowerShell:
+
+```powershell
+$env:TDSERIAL_ONENCE_DEVICE_ID = "Device ID exacto de Device Inspector"
+.\.venv\Scripts\python.exe -m pytest -s -q tests\test_onence_live.py
+```
+
+Esta prueba fuerza la obtención de un access token nuevo desde el almacén de credenciales y consulta el endpoint sin filtros ni parámetros adicionales, para comparar con la petición directa de PowerShell; muestra los mensajes y payloads decodificados. Se omite en la suite normal si no está definida la variable `TDSERIAL_ONENCE_DEVICE_ID`; no requiere ni importa el controlador serie.
+
+La documentación oficial consultada confirma que Historian continúa documentado bajo `/v1/inspect/...`, con paginación `pageSize`/`nextToken` (1–25 mensajes por página) y un periodo predeterminado de siete días. La migración a v2 publicada para finales de 2026 se refiere a endpoints de SIM Management; no se presupone que Historian tenga una ruta v2.
+
+Referencias: [OAuth token](https://help.1nce.com/api/authorization/post-access-token-post/), [Device Historian endpoint](https://help.1nce.com/api/1nce-os/get-device-historian-messages/), [Historian API examples](https://help.1nce.com/docs/1nce-os/1nce-os-device-inspector/device-inspector-historian-api/) y [Management API migration](https://help.1nce.com/platform-migration/api-migration/).
+
 ## Fase 5 — Comunicación bidireccional con 1NCE Device Controller
 
 La aplicación envía órdenes remotas mediante la API HTTPS de 1NCE Device Controller; 1NCE las entrega por UDP a la placa, y el firmware puede enviar telemetría y mensajes `command_ack` de vuelta a 1NCE OS. Esos mensajes pueden consultarse en la pestaña **1NCE Cloud** mediante Historian. La comunicación remota no requiere que la placa esté conectada por USB al ordenador.
@@ -195,32 +224,3 @@ Al pulsar una fila del historial local, su ID de acción se copia al campo de co
 Las operaciones HTTP se ejecutan fuera del hilo de la interfaz. Si una petición falla por red o timeout, su resultado puede ser desconocido: comprueba el historial y el dispositivo antes de volver a enviar, especialmente `led_toggle` y `reboot`. No hay cancelación de una petición HTTP en curso; antes de cerrar hay que esperar su finalización o timeout. Comprueba credenciales y permisos ante HTTP 401/403, ICCID ante 404 y límites de la cuenta ante 429.
 
 Ante HTTP 404 al enviar, comprueba también la URL base y que el **Device ID** seleccionado coincida exactamente con el de Device Inspector de la cuenta autenticada. Puede diferir del ICCID leído por el módem; la aplicación no elimina dígitos automáticamente. Un 404 por sí solo no permite determinar cuál de esos recursos no se ha encontrado.
-
-## Fase 4 — 1NCE OS Device Inspector Historian
-
-La pestaña **1NCE Cloud** funciona independientemente de COM6. Usa HTTPS con validación TLS, autenticación OAuth en `https://api.1nce.com/management-api/oauth/token`, HTTP Basic y el cuerpo JSON `{"grant_type":"client_credentials"}`. El botón **Probar conexión** comprueba la autenticación; los permisos de Historian se comprueban al consultar.
-
-Las credenciales solo se guardan o borran por acción explícita del usuario en el almacén de credenciales de Windows mediante `keyring`; no se incluyen en `config.json` ni en las exportaciones. El token permanece en memoria y se renueva antes de caducar; no se muestra ni se registra. Los fallos de autenticación, permisos, red, timeout y límite de solicitudes se presentan sin incluir secretos.
-
-Hay tres modos de consulta: **Todos los dispositivos** usa `GET /v1/inspect/devices/history` sin ICCID; **Seleccionar dispositivo** carga el inventario de `GET /v1/inspect/devices` y cruza los ICCID con los LABEL de `GET /v1/sims`; e **ICCID manual** mantiene la consulta directa `GET /v1/inspect/devices/{deviceId}/history`. LABEL repetidos no se consideran identificadores únicos: el selector muestra cada LABEL junto con su ICCID. Si no hay LABEL o falla la consulta de metadatos SIM, se puede seguir seleccionando el dispositivo por ICCID. **Actualizar dispositivos** vuelve a cargar esa correspondencia en memoria.
-
-Los tres modos admiten filtros de fechas y protocolo (UDP, CoAP o LwM2M) y paginación. Al lanzar una consulta, **Hasta** se actualiza a la hora actual para todos los periodos salvo **Personalizado**; **Últimos 7 días** también recalcula **Desde** dentro del límite de retención. Historian limita cada página a 25 mensajes; **Recuperar todos** respeta el límite total configurable y se detiene ante tokens repetidos. La lista de dispositivos y los metadatos SIM también tienen límites de paginación. Las páginas de mensajes se combinan sin duplicados. La casilla **Actualización automática** utiliza el mismo estilo visual que **Monitorización automática** de Diagnóstico IoT, no se solapa con una consulta en curso y respeta `Retry-After` ante HTTP 429. **Última consulta** se actualiza al iniciar cada petición y al completar correctamente la respuesta; así también se ve la hora de un intento que termina con error. Las fechas con zona se normalizan para mostrarse en hora local; las fechas sin zona se mantienen como tales, sin asumir UTC.
-
-La tabla muestra fecha y hora, LABEL, ICCID, protocolo, contenido, tamaño y estado de decodificación; los objetos JSON también se despliegan en columnas dinámicas por propiedad. La tabla y el detalle conservan el payload original y ofrecen representaciones como JSON, texto, HEX y Base64. Para payloads que llegan codificados en Base64, la representación JSON intenta también decodificar el contenido seleccionado, aunque el protocolo no active la decodificación automática. Las estadísticas distinguen los registros devueltos en la consulta del total histórico (no asumido), y presentan UDP, última fecha y correlación con transmisiones locales. La correlación prioriza `seq` si el JSON ya lo contiene; no se altera automáticamente el contenido enviado. Como alternativa, se compara payload y tiempo en una ventana aproximada de cinco minutos. Coincidencias duplicadas se marcan ambiguas; la ausencia de coincidencia solo significa que no aparece en el periodo consultado y no demuestra pérdida. Un `OK` AT tampoco confirma recepción remota.
-
-Los mensajes se pueden copiar y exportar como CSV o JSON. El ICCID y el Device ID se muestran y exportan completos.
-
-Para diagnosticar solicitudes, `logs/tdserial-iot.log` registra método, URL completa, parámetros, código HTTP, duración, una lista permitida de cabeceras de respuesta y el cuerpo de error de 1NCE con valores sensibles redactados. No registra Client Secret, access token, Authorization ni Basic. En el modo global la URL no incluye ICCID; las consultas por dispositivo envían el Device ID exactamente como lo devuelve el inventario o como se introduce manualmente, sin quitar dígitos. El ICCID obtenido mediante `AT+CCID` puede diferir en longitud del Device ID de Device Inspector.
-
-La integración real se puede probar sin iniciar la GUI ni conectar COM6. Guarda antes las credenciales en el almacén seguro desde la pestaña **1NCE Cloud** y pasa el Device ID exacto que funcionó en PowerShell:
-
-```powershell
-$env:TDSERIAL_ONENCE_DEVICE_ID = "Device ID exacto de Device Inspector"
-.\.venv\Scripts\python.exe -m pytest -s -q tests\test_onence_live.py
-```
-
-Esta prueba fuerza la obtención de un access token nuevo desde el almacén de credenciales y consulta el endpoint sin filtros ni parámetros adicionales, para comparar con la petición directa de PowerShell; muestra los mensajes y payloads decodificados. Se omite en la suite normal si no está definida la variable `TDSERIAL_ONENCE_DEVICE_ID`; no requiere ni importa el controlador serie.
-
-La documentación oficial consultada confirma que Historian continúa documentado bajo `/v1/inspect/...`, con paginación `pageSize`/`nextToken` (1–25 mensajes por página) y un periodo predeterminado de siete días. La migración a v2 publicada para finales de 2026 se refiere a endpoints de SIM Management; no se presupone que Historian tenga una ruta v2.
-
-Referencias: [OAuth token](https://help.1nce.com/api/authorization/post-access-token-post/), [Device Historian endpoint](https://help.1nce.com/api/1nce-os/get-device-historian-messages/), [Historian API examples](https://help.1nce.com/docs/1nce-os/1nce-os-device-inspector/device-inspector-historian-api/) y [Management API migration](https://help.1nce.com/platform-migration/api-migration/).
