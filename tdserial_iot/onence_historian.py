@@ -558,7 +558,9 @@ class OneNCEHistorianClient:
                     exc.headers.get("Retry-After") if exc.headers is not None else None
                 )
                 raise OneNCEHistoryError(
-                    _http_error_message(exc.code, retry_after, service=service),
+                    _http_error_message(
+                        exc.code, retry_after, service=service, error_body=error_body
+                    ),
                     status_code=exc.code,
                     retry_after=retry_after,
                 ) from None
@@ -708,9 +710,28 @@ def _http_error_message(
     retry_after: str | None,
     *,
     service: str = "Historian",
+    error_body: str = "",
 ) -> str:
     if status_code == 400:
-        return f"{service} rechazó los parámetros de la solicitud (HTTP 400)."
+        detail = (
+            "Comprueba las fechas y el protocolo; consulta el registro para más detalles."
+        )
+        try:
+            response = json.loads(error_body)
+        except (json.JSONDecodeError, ValueError):
+            response = None
+        if isinstance(response, dict) and isinstance(response.get("errors"), list):
+            if any(
+                isinstance(error, dict)
+                and error.get("message")
+                == "Please provide the current dateTime or a dateTime before now"
+                for error in response["errors"]
+            ):
+                detail = (
+                    "1NCE considera que hay una fecha futura. Comprueba el reloj "
+                    "del equipo y usa una fecha final anterior."
+                )
+        return f"{service} rechazó los parámetros de la solicitud (HTTP 400). {detail}"
     if status_code == 401:
         return f"1NCE rechazó el token de acceso al consultar {service} (HTTP 401)."
     if status_code == 403:

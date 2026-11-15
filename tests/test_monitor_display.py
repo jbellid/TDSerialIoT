@@ -486,9 +486,9 @@ def test_onence_last_seven_days_preset_uses_fresh_safe_range(qt_app, monkeypatch
         device_id, query = requests[0]
         assert device_id == "0012345678901234567"
         assert query["start_datetime"] is not None
-        assert query["end_datetime"] is not None
+        assert query["end_datetime"] is None
         query_span = (
-            query["end_datetime"] - query["start_datetime"]
+            datetime.now().astimezone() - query["start_datetime"]
         ).total_seconds()
         assert 6 * 24 * 60 * 60 < query_span < 7 * 24 * 60 * 60
         assert "supera la retención" not in window.onence_history_status_label.text()
@@ -506,7 +506,7 @@ def test_onence_last_seven_days_preset_uses_fresh_safe_range(qt_app, monkeypatch
         "Personalizado",
     ],
 )
-def test_onence_history_refreshes_until_at_query_time_except_custom(
+def test_onence_history_refreshes_presets_and_keeps_custom_dates(
     qt_app, monkeypatch, period
 ):
     assert qt_app is QApplication.instance()
@@ -538,10 +538,15 @@ def test_onence_history_refreshes_until_at_query_time_except_custom(
         window.onence_end_datetime.setDateTime(
             window.onence_end_datetime.dateTime().addSecs(-300)
         )
+        if period in ("Última hora", "Últimas 24 horas", "Últimos 7 días"):
+            window.onence_start_datetime.setDateTime(
+                window.onence_start_datetime.dateTime().addSecs(-300)
+            )
         if period == "Personalizado":
             window.onence_start_datetime.setDateTime(
                 window.onence_end_datetime.dateTime().addSecs(-3600)
             )
+        custom_start = window._local_datetime(window.onence_start_datetime)
         custom_end = window._local_datetime(window.onence_end_datetime)
         query_started_at = datetime.now().astimezone()
 
@@ -564,17 +569,97 @@ def test_onence_history_refreshes_until_at_query_time_except_custom(
         query_end = requests[0]["end_datetime"]
         if period == "Últimos mensajes":
             assert query_end is None
+            assert requests[0]["start_datetime"] is None
         elif period == "Personalizado":
+            assert requests[0]["start_datetime"] == custom_start
             assert query_end == custom_end
         else:
-            assert query_end is not None
-            assert abs((query_end - query_started_at).total_seconds()) < 5
+            assert query_end is None
+            expected_age = {
+                "Última hora": 3600,
+                "Últimas 24 horas": 86400,
+                "Últimos 7 días": 7 * 86400 - 60,
+            }[period]
+            assert abs(
+                (query_started_at - requests[0]["start_datetime"]).total_seconds()
+                - expected_age
+            ) < 5
             assert abs(
                 (
                     window._local_datetime(window.onence_end_datetime)
                     - query_started_at
                 ).total_seconds()
             ) < 5
+    finally:
+        window.close()
+
+
+def test_onence_manual_pagination_keeps_filters_and_discards_stale_token(
+    qt_app, monkeypatch
+):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    monkeypatch.setattr(
+        main_window_module.OneNCEAuthenticator,
+        "get_access_token",
+        lambda self, *, force_refresh=False: AccessToken("fresh-token", "Bearer", 3600),
+    )
+    requests = []
+
+    def get_all_history_page(self, **kwargs):
+        requests.append(kwargs)
+        if len(requests) == 3:
+            raise main_window_module.OneNCEHistoryError("fallo simulado")
+        return main_window_module.HistoryPage((), f"token-{len(requests)}")
+
+    monkeypatch.setattr(
+        main_window_module.OneNCEHistorianClient,
+        "get_all_history_page",
+        get_all_history_page,
+    )
+    window = MainWindow()
+
+    def wait_for_query(count):
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(
+            lambda: loop.quit()
+            if len(requests) >= count and window._onence_history_thread is None
+            else None
+        )
+        timer.start()
+        QTimer.singleShot(3000, loop.quit)
+        loop.exec()
+        timer.stop()
+        assert len(requests) == count
+        assert window._onence_history_thread is None
+
+    try:
+        window.onence_client_id_edit.setText("test-client")
+        window.onence_client_secret_edit.setText("test-secret")
+        window.onence_range_combo.setCurrentText("Última hora")
+        window._start_onence_history_query()
+        wait_for_query(1)
+
+        window.onence_range_combo.setCurrentText("Últimas 24 horas")
+        window._start_onence_history_query(load_more=True)
+        wait_for_query(2)
+        assert requests[1]["start_datetime"] == requests[0]["start_datetime"]
+        assert requests[1]["end_datetime"] is None
+        assert requests[1]["next_token"] == "token-1"
+
+        window._start_onence_history_query()
+        wait_for_query(3)
+        assert requests[2]["next_token"] is None
+        assert requests[2]["end_datetime"] is None
+        assert (
+            requests[0]["start_datetime"] - requests[2]["start_datetime"]
+        ).total_seconds() > 22 * 3600
+        assert window._cloud_next_token is None
+        window._start_onence_history_query(load_more=True)
+        assert "No hay más páginas" in window.onence_history_status_label.text()
     finally:
         window.close()
 

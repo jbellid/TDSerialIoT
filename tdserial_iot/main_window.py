@@ -581,6 +581,10 @@ class MainWindow(QMainWindow):
         self.onence_end_datetime = QDateTimeEdit()
         self.onence_end_datetime.setCalendarPopup(True)
         self.onence_end_datetime.setDisplayFormat("dd/MM/yyyy HH:mm:ss")
+        self.onence_end_datetime.setToolTip(
+            "Solo se envía en el periodo Personalizado. En los periodos "
+            "predefinidos, 1NCE utiliza su hora actual."
+        )
         self.onence_end_datetime.setDateTime(QDateTime.currentDateTime())
         self.onence_start_datetime.setDateTime(
             QDateTime.currentDateTime().addDays(-HISTORIAN_RETENTION_DAYS)
@@ -617,6 +621,7 @@ class MainWindow(QMainWindow):
             self._update_onence_auto_interval
         )
         self.onence_history_status_label = QLabel("Historial no consultado")
+        self.onence_history_status_label.setWordWrap(True)
         self.onence_last_query_label = QLabel("Última consulta: N/D")
         self.onence_stats_label = QLabel(
             "Registros en History: 0 · UDP: 0 · Envíos locales: 0"
@@ -1028,27 +1033,27 @@ class MainWindow(QMainWindow):
             start_datetime: datetime | None = None
             preset = self.onence_range_combo.currentText()
             if preset != "Personalizado":
-                preset_end = QDateTime.currentDateTime()
-                self.onence_end_datetime.setDateTime(preset_end)
+                self._apply_onence_date_preset(preset)
                 if preset == "Últimos 7 días":
                     self.onence_start_datetime.setDateTime(
-                        preset_end.addDays(-HISTORIAN_RETENTION_DAYS).addSecs(60)
+                        self.onence_start_datetime.dateTime().addSecs(60)
                     )
             end_datetime: datetime | None = None
             if preset != "Últimos mensajes":
                 start_datetime = self._local_datetime(self.onence_start_datetime)
-                end_datetime = self._local_datetime(self.onence_end_datetime)
                 now = datetime.now().astimezone()
-                if start_datetime > end_datetime:
-                    self.onence_history_status_label.setText(
-                        "La fecha inicial debe ser anterior a la fecha final."
-                    )
-                    return
-                if end_datetime > now:
-                    self.onence_history_status_label.setText(
-                        "La fecha final no puede estar en el futuro."
-                    )
-                    return
+                if preset == "Personalizado":
+                    end_datetime = self._local_datetime(self.onence_end_datetime)
+                    if start_datetime > end_datetime:
+                        self.onence_history_status_label.setText(
+                            "La fecha inicial debe ser anterior a la fecha final."
+                        )
+                        return
+                    if end_datetime > now:
+                        self.onence_history_status_label.setText(
+                            "La fecha final no puede estar en el futuro."
+                        )
+                        return
                 if start_datetime < now - timedelta(
                     days=HISTORIAN_RETENTION_DAYS, seconds=60
                 ):
@@ -1065,6 +1070,7 @@ class MainWindow(QMainWindow):
                 "end_datetime": end_datetime,
             }
             self._cloud_query_filters = query_filters
+            self._cloud_next_token = None
             self._cloud_history_complete = False
 
         if self._onence_authenticator is None:

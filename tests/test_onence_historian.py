@@ -250,6 +250,32 @@ def test_historian_timeout_is_reported_without_retries(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            b'{"errors":[{"message":"Please provide the current dateTime or a dateTime before now"}]}',
+            "fecha futura",
+        ),
+        (b'{"errors":[{"message":"invalid private-token"}]}', "registro"),
+        (b"not json", "registro"),
+    ],
+)
+def test_historian_http_400_has_safe_actionable_detail(monkeypatch, body, expected):
+    def urlopen(request, **_kwargs):
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "bad request", {}, io.BytesIO(body)
+        )
+
+    monkeypatch.setattr(historian.urllib.request, "urlopen", urlopen)
+    with pytest.raises(OneNCEHistoryError) as error:
+        OneNCEHistorianClient(FakeAuthenticator()).get_history_page("00123")
+
+    assert "HTTP 400" in str(error.value)
+    assert expected in str(error.value)
+    assert "private-token" not in str(error.value)
+
+
 def test_http_429_respects_retry_after_without_retrying(monkeypatch):
     calls = []
 
@@ -472,6 +498,37 @@ def test_fetch_all_stops_at_configured_limit(monkeypatch):
     assert results[0][0] is True
     assert len(results[0][1].messages) == 2
     assert results[0][1].next_token == "token-2"
+
+
+@pytest.mark.parametrize("device_id", [None, "00123"])
+def test_fetch_all_preserves_start_and_omits_end_across_pages(monkeypatch, device_id):
+    requests = []
+
+    def urlopen(request, **_kwargs):
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(request.full_url).query))
+        requests.append(query)
+        return FakeResponse(
+            {"items": [], "nextToken": "token-1"} if len(requests) == 1 else {"items": []}
+        )
+
+    monkeypatch.setattr(historian.urllib.request, "urlopen", urlopen)
+    start = datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc)
+    worker = OneNCEHistoryWorker(
+        FakeAuthenticator(), device_id, page_size=10, protocol="UDP",
+        start_datetime=start, end_datetime=None, next_token=None,
+        fetch_all=True, max_records=50,
+    )
+    results = []
+    worker.completed.connect(lambda *args: results.append(args))
+    worker.run()
+
+    assert results[0][0] is True
+    assert len(requests) == 2
+    assert requests[0]["startDateTime"] == requests[1]["startDateTime"]
+    assert "endDateTime" not in requests[0]
+    assert "endDateTime" not in requests[1]
+    assert "nextToken" not in requests[0]
+    assert requests[1]["nextToken"] == "token-1"
 
 
 def test_fetch_all_stops_when_historian_repeats_a_token(monkeypatch):
