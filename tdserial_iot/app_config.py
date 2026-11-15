@@ -20,7 +20,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "parity": "N",
     "stopbits": 1,
     "flow_control": "Ninguno",
-    "initialize_at_on_connect": False,
     "clear_buffer_on_connect": False,
     "autoscroll": True,
     "display_format": "ASCII",
@@ -58,6 +57,7 @@ def load_config() -> dict[str, Any]:
     if not isinstance(stored, dict):
         logger.error("La configuración local no es un objeto JSON; se usarán valores predeterminados")
         return deepcopy(DEFAULT_CONFIG)
+    stored.pop("initialize_at_on_connect", None)
     return {**deepcopy(DEFAULT_CONFIG), **stored}
 
 

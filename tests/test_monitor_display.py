@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
+import tdserial_iot.app_config as app_config_module
 import tdserial_iot.main_window as main_window_module
 import tdserial_iot.onence_historian as onence_historian_module
 from tdserial_iot.app_config import DEFAULT_CONFIG
@@ -23,6 +24,19 @@ def qt_app():
     yield app
 
 
+def test_load_config_discards_removed_at_initialization_setting(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"initialize_at_on_connect": True}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_config_module, "CONFIG_PATH", config_path)
+
+    config = app_config_module.load_config()
+
+    assert "initialize_at_on_connect" not in config
+
+
 def test_display_checkbox_redraws_existing_records(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
@@ -34,15 +48,16 @@ def test_display_checkbox_redraws_existing_records(qt_app, monkeypatch):
     )
     window = MainWindow()
     try:
-        connection_layout = window.initialize_at_check.parentWidget().layout()
-        initialize_position = connection_layout.getItemPosition(
-            connection_layout.indexOf(window.initialize_at_check)
+        connection_layout = window.clear_buffer_check.parentWidget().layout()
+        clear_buffer_position = connection_layout.getItemPosition(
+            connection_layout.indexOf(window.clear_buffer_check)
         )
         connect_position = connection_layout.getItemPosition(
             connection_layout.indexOf(window.connect_button)
         )
-        assert initialize_position[0] == connect_position[0]
-        assert initialize_position[1] < connect_position[1]
+        assert clear_buffer_position[0] == connect_position[0]
+        assert clear_buffer_position[1] < connect_position[1]
+        assert not hasattr(window, "initialize_at_check")
         assert window.autoscroll_check.objectName() == "toolbarCheck"
         assert window.show_details_check.objectName() == "toolbarCheck"
         assert window.onence_auto_check.objectName() == "toolbarCheck"
@@ -1393,9 +1408,13 @@ def test_echo_checkbox_sends_ate1_and_ate0_through_serial_queue(qt_app, monkeypa
         window.close()
 
 
-def test_connect_does_not_send_automatic_echo_command(qt_app, monkeypatch):
+def test_connect_enters_connected_state_without_sending_commands(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
-    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(
+        main_window_module,
+        "load_config",
+        lambda: {**DEFAULT_CONFIG, "initialize_at_on_connect": True},
+    )
     monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
     window = MainWindow()
     sent: list[bytes] = []
@@ -1406,16 +1425,15 @@ def test_connect_does_not_send_automatic_echo_command(qt_app, monkeypatch):
         assert not window.echo_check.isChecked()
         assert window.command_input.isEnabled()
         assert window.terminator_combo.isEnabled()
-        assert window.status_label.text() == "Puerto conectado — modo pasivo"
-        assert not window.initialize_at_check.isChecked()
-        assert not window._initialization_timer.isActive()
+        assert window.status_label.text() == "Puerto conectado"
+        assert not hasattr(window, "_initialization_timer")
         assert not window.automatic_monitor_check.isChecked()
         assert not window._automatic_monitor_timer.isActive()
     finally:
         window.close()
 
 
-def test_passive_connect_allows_manual_sequential_commands(qt_app, monkeypatch):
+def test_connect_allows_manual_sequential_commands(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
     monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
@@ -1435,7 +1453,7 @@ def test_passive_connect_allows_manual_sequential_commands(qt_app, monkeypatch):
         window.close()
 
 
-def test_opt_in_initialization_waits_then_sends_at_and_ate0_sequentially(
+def test_disconnect_stops_monitor_timer_and_reconnects_without_commands(
     qt_app, monkeypatch
 ):
     assert qt_app is QApplication.instance()
@@ -1445,84 +1463,21 @@ def test_opt_in_initialization_waits_then_sends_at_and_ate0_sequentially(
     sent: list[bytes] = []
     monkeypatch.setattr(window, "_write_queued_command", sent.append)
     try:
-        window.initialize_at_check.setChecked(True)
         window._on_connection_changed(True)
-        assert window._initialization_timer.isActive()
-        assert sent == []
-        assert not window.command_input.isEnabled()
-
-        window._initialization_timer.stop()
-        window._start_at_initialization()
-        assert sent == [b"AT\r"]
-        window._on_transmitted(b"AT\r")
-        assert "TX → AT" in window.console.toPlainText()
-        window._process_rx_line(b"OK\r\n")
-        assert sent == [b"AT\r", b"ATE0\r"]
-        window._on_transmitted(b"ATE0\r")
-        assert "TX → ATE0" in window.console.toPlainText()
-        window._process_rx_line(b"OK\r\n")
-        assert not window._initializing_at
-        assert window.status_label.text() == "Puerto conectado — AT inicializado"
-    finally:
-        window.close()
-
-
-def test_initialization_timeout_restores_manual_command_availability(qt_app, monkeypatch):
-    assert qt_app is QApplication.instance()
-    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
-    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
-    window = MainWindow()
-    sent: list[bytes] = []
-    monkeypatch.setattr(window, "_write_queued_command", sent.append)
-    try:
-        window.initialize_at_check.setChecked(True)
-        window._on_connection_changed(True)
-        window._initialization_timer.stop()
-        window._start_at_initialization()
-        assert sent == [b"AT\r"]
-
-        window._on_command_timeout()
-
-        assert not window._initializing_at
-        assert not window._command_queue.paused
-        assert window.send_button.isEnabled()
-        assert "fallida" in window.status_label.text()
-    finally:
-        window.close()
-
-
-def test_disconnect_stops_initialization_and_monitor_timers_and_reconnect_is_passive(
-    qt_app, monkeypatch
-):
-    assert qt_app is QApplication.instance()
-    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
-    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
-    window = MainWindow()
-    sent: list[bytes] = []
-    monkeypatch.setattr(window, "_write_queued_command", sent.append)
-    try:
-        window.initialize_at_check.setChecked(True)
-        window._on_connection_changed(True)
-        assert window._initialization_timer.isActive()
-        window._initialization_timer.stop()
-        window._initializing_at = False
 
         window.automatic_monitor_check.setEnabled(True)
         window.automatic_monitor_check.setChecked(True)
         assert window._automatic_monitor_timer.isActive()
         window._on_connection_changed(False)
-        assert not window._initialization_timer.isActive()
         assert not window._automatic_monitor_timer.isActive()
         assert not window.automatic_monitor_check.isChecked()
         assert window.monitor_status_label.text() == "Monitorización detenida"
 
         sent.clear()
-        window.initialize_at_check.setChecked(False)
         window._on_connection_changed(True)
         assert sent == []
         assert not window.automatic_monitor_check.isChecked()
         assert not window._automatic_monitor_timer.isActive()
-        assert not window._initialization_timer.isActive()
-        assert window.status_label.text() == "Puerto conectado — modo pasivo"
+        assert window.status_label.text() == "Puerto conectado"
     finally:
         window.close()

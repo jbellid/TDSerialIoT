@@ -319,7 +319,6 @@ def _cloud_message_key(message: CloudMessage) -> tuple[Any, ...]:
 
 class MainWindow(QMainWindow):
     COMMAND_TIMEOUT_MS = 10_000
-    AT_INITIALIZATION_DELAY_MS = 10_000
 
     open_requested = Signal(dict)
     write_requested = Signal(bytes)
@@ -343,7 +342,6 @@ class MainWindow(QMainWindow):
         )
         self._is_connected = False
         self._connecting = False
-        self._initializing_at = False
         self._paused = False
         self._pending_render: list[tuple[str, bytes, datetime]] = []
         self._records: list[tuple[str, bytes, datetime]] = []
@@ -397,9 +395,6 @@ class MainWindow(QMainWindow):
         self._cloud_auto_timer.timeout.connect(self._query_onence_history)
         self._automatic_monitor_timer = QTimer(self)
         self._automatic_monitor_timer.timeout.connect(self._run_automatic_monitor)
-        self._initialization_timer = QTimer(self)
-        self._initialization_timer.setSingleShot(True)
-        self._initialization_timer.timeout.connect(self._start_at_initialization)
         self._rx_flush_timer = QTimer(self)
         self._rx_flush_timer.setSingleShot(True)
         self._rx_flush_timer.setInterval(100)
@@ -2026,11 +2021,6 @@ class MainWindow(QMainWindow):
         self.iot_results.appendPlainText(f"[{stamp}] {message}")
 
     def _start_iot_flow(self, action: str) -> None:
-        if self._initializing_at:
-            self._append_iot_result(
-                "Operación no iniciada: espera a que termine la inicialización AT."
-            )
-            return
         if not self._is_connected:
             self._append_iot_result("Error: conecta el módem antes de operar.")
             return
@@ -2627,15 +2617,6 @@ class MainWindow(QMainWindow):
         self.connect_button = QPushButton("Conectar")
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self._toggle_connection)
-        self.initialize_at_check = QCheckBox("Inicializar comunicación AT al conectar")
-        self.initialize_at_check.setObjectName("toolbarCheck")
-        self.initialize_at_check.setChecked(
-            bool(self._config.get("initialize_at_on_connect", False))
-        )
-        self.initialize_at_check.setToolTip(
-            "Desactivado: conexión pasiva, sin comandos AT. Activado: espera "
-            "10 segundos para que finalice el arranque LilyGO y ejecuta AT y ATE0 por la cola serie."
-        )
         self.clear_buffer_check = QCheckBox("Limpiar buffer")
         self.clear_buffer_check.setObjectName("toolbarCheck")
         self.clear_buffer_check.setChecked(
@@ -2662,10 +2643,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stop_bits_combo, 0, 10)
         layout.addWidget(QLabel("Flujo"), 1, 0)
         layout.addWidget(self.flow_combo, 1, 1)
-        layout.addWidget(self.initialize_at_check, 1, 2, 1, 2)
-        layout.addWidget(self.clear_buffer_check, 1, 4, 1, 1)
-        layout.addWidget(self.connect_button, 1, 5, 1, 2)
-        layout.addWidget(self.status_label, 1, 7, 1, 4)
+        layout.addWidget(self.clear_buffer_check, 1, 2, 1, 2)
+        layout.addWidget(self.connect_button, 1, 4, 1, 2)
+        layout.addWidget(self.status_label, 1, 6, 1, 5)
         return group
 
     def _build_monitor_panel(self) -> QGroupBox:
@@ -2884,23 +2864,14 @@ class MainWindow(QMainWindow):
             return
         self._connecting = True
         self.connect_button.setEnabled(False)
-        self.initialize_at_check.setEnabled(False)
         self.clear_buffer_check.setEnabled(False)
         self.open_requested.emit(settings)
 
     def _on_connection_changed(self, connected: bool) -> None:
         logger.info("Cambio de estado de conexión serie: %s", connected)
         if not connected:
-            if self._initializing_at:
-                logger.info("Inicialización AT cancelada por desconexión")
-                self._add_event(
-                    "SYSTEM",
-                    "Inicialización AT cancelada por desconexión".encode("utf-8"),
-                )
             self._is_connected = False
             self._command_timeout_timer.stop()
-            self._initialization_timer.stop()
-            self._initializing_at = False
             self._automatic_monitor_timer.stop()
             self.automatic_monitor_check.blockSignals(True)
             self.automatic_monitor_check.setChecked(False)
@@ -2943,108 +2914,28 @@ class MainWindow(QMainWindow):
             self.echo_check.blockSignals(True)
             self.echo_check.setChecked(False)
             self.echo_check.blockSignals(False)
-            if self.initialize_at_check.isChecked():
-                self._initializing_at = True
-                self.status_label.setText("Puerto conectado — inicializando AT")
-                self.status_label.setObjectName("connectedStatus")
-                logger.info(
-                    "Inicialización AT solicitada; comenzará en %d ms",
-                    self.AT_INITIALIZATION_DELAY_MS,
-                )
-                self._add_event(
-                    "SYSTEM",
-                    f"Inicialización AT programada en {self.AT_INITIALIZATION_DELAY_MS // 1000} s".encode(
-                        "utf-8"
-                    ),
-                )
-                self._initialization_timer.start(self.AT_INITIALIZATION_DELAY_MS)
-            else:
-                self.status_label.setText("Puerto conectado — modo pasivo")
-                self.status_label.setObjectName("connectedStatus")
-                logger.info("Puerto conectado en modo pasivo; no se enviarán comandos AT")
-                self._add_event("SYSTEM", "Puerto conectado — modo pasivo".encode("utf-8"))
+            self.status_label.setText("Puerto conectado")
+            self.status_label.setObjectName("connectedStatus")
+            logger.info("Puerto conectado; no se enviarán comandos AT automáticamente")
+            self._add_event("SYSTEM", "Puerto conectado".encode("utf-8"))
         else:
-            self._initializing_at = False
             self.status_label.setText("● Desconectado")
             self.status_label.setObjectName("disconnectedStatus")
-        self.echo_check.setEnabled(
-            connected and not self._command_queue.paused and not self._initializing_at
-        )
-        self.command_input.setEnabled(connected and not self._initializing_at)
-        self.send_button.setEnabled(
-            connected and not self._command_queue.paused and not self._initializing_at
-        )
-        self.direct_send_check.setEnabled(connected and not self._initializing_at)
+        self.echo_check.setEnabled(connected and not self._command_queue.paused)
+        self.command_input.setEnabled(connected)
+        self.send_button.setEnabled(connected and not self._command_queue.paused)
+        self.direct_send_check.setEnabled(connected)
         self.terminator_combo.setEnabled(
             connected
             and not self.direct_send_check.isChecked()
         )
         self.connect_button.setEnabled(True)
         self.connect_button.setText("Desconectar" if connected else "Conectar")
-        self.initialize_at_check.setEnabled(not connected)
         self.clear_buffer_check.setEnabled(not connected)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self._add_event("SYSTEM", b"Puerto serie conectado" if connected else b"Puerto serie desconectado")
-        if connected and self._initializing_at:
-            self.automatic_monitor_check.setEnabled(False)
-        else:
-            self.automatic_monitor_check.setEnabled(connected)
-        self._update_queue_controls()
-
-    def _start_at_initialization(self) -> None:
-        if not self._is_connected or not self._initializing_at:
-            return
-        if self._command_queue.is_busy or self._command_queue.paused:
-            logger.warning("Inicialización AT cancelada porque la cola no está disponible")
-            self._finish_at_initialization(False, "La cola AT no está disponible.")
-            return
-        timeout_ms = self.command_timeout_spin.value() * 1000
-        commands = [
-            make_at_command(b"AT\r", timeout_ms, purpose="init:verify"),
-            make_at_command(b"ATE0\r", timeout_ms, purpose="init:echo"),
-        ]
-        logger.info("Inicio de inicialización AT: verificación AT seguida de ATE0")
-        self._add_event(
-            "SYSTEM", "Inicio de inicialización AT: AT y ATE0".encode("utf-8")
-        )
-        first = self._command_queue.enqueue(commands, priority=True)
-        if first is not None:
-            self._write_queued_command(first.data)
-
-    def _on_initialization_command_finished(
-        self, command: AtCommand, success: bool, *, timed_out: bool = False
-    ) -> None:
-        purpose = command.purpose
-        if purpose is None or not purpose.startswith("init:"):
-            return
-        if not success:
-            self._command_queue.cancel_pending_purpose("init:")
-            if timed_out and self._command_queue.paused:
-                self._command_queue.resume()
-            reason = "timeout" if timed_out else "respuesta de error del módem"
-            self._finish_at_initialization(False, f"Inicialización AT fallida: {reason}.")
-            return
-        if purpose == "init:echo":
-            self._finish_at_initialization(True, "Inicialización AT completada.")
-
-    def _finish_at_initialization(self, success: bool, message: str) -> None:
-        self._initialization_timer.stop()
-        self._initializing_at = False
-        logger.info("%s", message)
-        self._add_event("SYSTEM" if success else "ERROR", message.encode("utf-8"))
-        if self._is_connected:
-            self.status_label.setText(
-                "Puerto conectado — AT inicializado"
-                if success
-                else "Puerto conectado — inicialización AT fallida"
-            )
-            self.status_label.setObjectName(
-                "connectedStatus" if success else "disconnectedStatus"
-            )
-            self.status_label.style().unpolish(self.status_label)
-            self.status_label.style().polish(self.status_label)
-            self.automatic_monitor_check.setEnabled(True)
+        self.automatic_monitor_check.setEnabled(connected)
         self._update_queue_controls()
 
     def _on_transmitted(self, data: bytes) -> None:
@@ -3054,7 +2945,7 @@ class MainWindow(QMainWindow):
         if (
             active is not None
             and active.purpose is not None
-            and active.purpose.startswith(("init:", "auto:"))
+            and active.purpose.startswith("auto:")
         ):
             logger.info(
                 "Comando automático transmitido (%s): %s",
@@ -3131,9 +3022,6 @@ class MainWindow(QMainWindow):
         self._on_diagnostic_command_finished(
             event.command, event.kind == "success"
         )
-        self._on_initialization_command_finished(
-            event.command, event.kind == "success"
-        )
         self._on_iot_command_finished(
             event.command, event.kind == "success"
         )
@@ -3155,9 +3043,6 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "TdSerial IoT", message)
 
     def _send_command(self) -> None:
-        if self._initializing_at:
-            self._on_error("Espera a que termine la inicialización de comunicación AT.")
-            return
         if self._iot_flow_action is not None:
             self._on_error("Espera a que termine la operación de Comunicaciones IoT.")
             return
@@ -3243,27 +3128,15 @@ class MainWindow(QMainWindow):
             timed_out.data.rstrip(b"\r\n"),
         )
         self._on_diagnostic_command_finished(timed_out, False, timed_out=True)
-        self._on_initialization_command_finished(timed_out, False, timed_out=True)
         self._on_iot_command_finished(timed_out, False, timed_out=True)
         if timed_out.purpose is not None and timed_out.purpose.startswith("auto:"):
             self.automatic_monitor_check.setChecked(False)
         command = timed_out.data.rstrip(b"\r\n").decode("ascii", errors="replace")
         seconds = timed_out.timeout_ms / 1000
-        initialization_timeout = bool(
-            timed_out.purpose and timed_out.purpose.startswith("init:")
-        )
-        self._queue_status = (
-            "Inicialización AT fallida; cola disponible"
-            if initialization_timeout
-            else "Pausada por timeout"
-        )
+        self._queue_status = "Pausada por timeout"
         timeout_message = (
             f"Timeout esperando respuesta completa a {command!r} ({seconds:g} s). "
-            + (
-                "La cola vuelve a estar disponible."
-                if initialization_timeout
-                else "La cola está pausada."
-            )
+            "La cola está pausada."
         )
         self._add_event("ERROR", timeout_message.encode("utf-8"))
         if self._command_queue.cancel_requested:
@@ -3450,9 +3323,7 @@ class MainWindow(QMainWindow):
             and not self._command_queue.cancel_requested
         )
         operation_idle = self._iot_flow_action is None
-        input_available = (
-            self._is_connected and operation_idle and not self._initializing_at
-        )
+        input_available = self._is_connected and operation_idle
         self.command_input.setEnabled(input_available)
         self.direct_send_check.setEnabled(input_available)
         self.terminator_combo.setEnabled(
@@ -3480,7 +3351,6 @@ class MainWindow(QMainWindow):
     def _set_modem_echo(self, enabled: bool) -> None:
         if (
             not self._is_connected
-            or self._initializing_at
             or self._command_queue.paused
             or self._iot_flow_action is not None
         ):
@@ -3497,11 +3367,6 @@ class MainWindow(QMainWindow):
             self._update_queue_controls()
 
     def _start_diagnostic(self, keys: Sequence[str]) -> None:
-        if self._initializing_at:
-            self.diagnostic_progress_label.setText(
-                "Espera a que termine la inicialización de comunicación AT."
-            )
-            return
         if self._iot_flow_action is not None:
             self.diagnostic_progress_label.setText(
                 "Espera a que termine la operación de Comunicaciones IoT."
@@ -3838,16 +3703,6 @@ class MainWindow(QMainWindow):
             self.automatic_monitor_check.blockSignals(False)
             self._set_monitor_status(False)
             return
-        if self._initializing_at:
-            logger.info("Monitorización automática rechazada durante inicialización AT")
-            self.automatic_monitor_check.blockSignals(True)
-            self.automatic_monitor_check.setChecked(False)
-            self.automatic_monitor_check.blockSignals(False)
-            self._set_monitor_status(False)
-            self.diagnostic_progress_label.setText(
-                "Espera a que termine la inicialización de comunicación AT."
-            )
-            return
         if not self._is_connected:
             self.diagnostic_progress_label.setText(
                 "Conecta el módem antes de activar la monitorización."
@@ -3882,7 +3737,7 @@ class MainWindow(QMainWindow):
                 self._automatic_monitor_timer.start()
 
     def _set_monitor_status(self, active: bool) -> None:
-        if active and self._is_connected and not self._initializing_at:
+        if active and self._is_connected:
             self.monitor_status_label.setText(
                 f"Monitorización activa · {self.monitor_interval_combo.currentText()}"
             )
@@ -4044,7 +3899,6 @@ class MainWindow(QMainWindow):
                 "parity": settings["parity"],
                 "stopbits": settings["stopbits"],
                 "flow_control": settings["flow_control"],
-                "initialize_at_on_connect": self.initialize_at_check.isChecked(),
                 "clear_buffer_on_connect": self.clear_buffer_check.isChecked(),
                 "autoscroll": self.autoscroll_check.isChecked(),
                 "display_format": self.display_combo.currentText(),
@@ -4081,7 +3935,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._command_timeout_timer.stop()
-        self._initialization_timer.stop()
         self._automatic_monitor_timer.stop()
         self._cloud_auto_timer.stop()
         if self._onence_auth_thread is not None:
