@@ -278,6 +278,23 @@ def test_command_queue_requires_complete_line_and_ignores_echo():
     assert result is not None and result.kind == "success"
 
 
+def test_standalone_prompt_completes_noninteractive_commands():
+    from tdserial_iot.command_queue import AtCommandQueue, make_at_command
+
+    for data, prompt, complete in (
+        (b"AT+CASEND=0,79,10000\r", b"> ", False),
+        (b"AT+OTHER\r", b" \t>\r\n", True),
+        (b"AT+CAOPEN=1,0\r", b">", False),
+    ):
+        queue = AtCommandQueue()
+        queue.enqueue([make_at_command(data), make_at_command(b"AT\r")])
+        assert queue.accept_line(b"prefix > suffix\r\n") is None
+        result = queue.accept_line(prompt, complete=complete)
+        assert result is not None and result.kind == "success"
+        assert queue.completed_count == 1
+        assert queue.start_next().data == b"AT\r"
+
+
 def test_caopen_requires_ok_and_correlated_async_confirmation():
     from tdserial_iot.command_queue import AtCommandQueue, make_at_command
 

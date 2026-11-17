@@ -155,6 +155,8 @@ class AtCommandQueue:
             return None
 
         response = line.strip(b"\r\n")
+        if command.interaction is None and response.strip(b" \t") == b">":
+            return self._finish("success", line)
         if (
             command.interaction is not None
             and not self._prompt_sent

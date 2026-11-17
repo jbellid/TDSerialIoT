@@ -1019,6 +1019,35 @@ def test_direct_send_transmits_single_character_without_at_terminator_and_displa
         window.close()
 
 
+def test_manual_prompt_releases_queue_for_direct_payload(qt_app, monkeypatch):
+    assert qt_app is QApplication.instance()
+    monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
+    monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
+    window = MainWindow()
+    transmitted: list[bytes] = []
+    try:
+        window.write_requested.disconnect()
+        window.write_requested.connect(transmitted.append)
+        window._is_connected = True
+        window.command_input.setPlainText("AT+CASEND=0,5,10000")
+        window._send_command()
+        window.direct_send_check.setChecked(True)
+        window.command_input.setPlainText("hello")
+        assert not window.send_button.isEnabled()
+
+        window._on_received(b"\r\n> ")
+
+        assert window.send_button.isEnabled()
+        assert not window._command_queue.is_busy
+        assert not window._command_timeout_timer.isActive()
+        window._send_command()
+        assert transmitted == [b"AT+CASEND=0,5,10000\r", b"hello"]
+        window._on_received(b"\r\nOK\r\n")
+        assert window._command_queue.completed_count == 1
+    finally:
+        window.close()
+
+
 def test_fragmented_prompt_sends_exact_payload_immediately_without_finishing_queue(
     qt_app, monkeypatch
 ):
