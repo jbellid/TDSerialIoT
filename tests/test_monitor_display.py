@@ -172,27 +172,36 @@ def test_sequence_controls_show_only_for_multiline_sequence(qt_app, monkeypatch)
         window.close()
 
 
-def test_single_command_timeout_shows_resume_and_cancel_controls(qt_app, monkeypatch):
+def test_single_commands_send_without_waiting_and_reassemble_rx(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
     monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
     window = MainWindow()
-    monkeypatch.setattr(window, "_write_queued_command", lambda command: None)
+    sent: list[bytes] = []
     try:
+        window.write_requested.disconnect()
+        window.write_requested.connect(sent.append)
         window._is_connected = True
-        window.command_input.setPlainText("!")
+        window.terminator_combo.setCurrentText("CRLF")
+        window.command_input.setPlainText("\nATI\n")
         window._send_command()
-        window._command_timeout_timer.stop()
+        window.command_input.setPlainText("AT+CSQ")
+        window._send_command()
+        assert sent == [b"ATI\r\n", b"AT+CSQ\r\n"]
+        assert not window._command_queue.is_busy
+        assert not window._command_timeout_timer.isActive()
 
-        window._on_command_timeout()
-
-        assert window._command_queue.paused
-        assert not window.sequence_controls_widget.isHidden()
-        assert window.resume_queue_button.isEnabled()
-        assert window.cancel_queue_button.isEnabled()
-
-        window._cancel_command_queue()
+        chunks = [b"Arduino UNO", b" Rev3\r", b"\n\r\nERROR\r\nready\x00"]
+        for chunk in chunks:
+            window._on_received(chunk)
+        assert window._monitor_flush_timer.isActive()
+        window._flush_monitor_line()
+        assert [data for direction, data, _ in window._records if direction == "RX"] == [
+            b"Arduino UNO Rev3\r\n", b"\r\n", b"ERROR\r\n", b"ready\x00",
+        ]
+        assert "RX ← Arduino UNO Rev3" in window.console.toPlainText()
         assert not window._command_queue.paused
+        assert not window._rx_flush_timer.isActive()
         assert window.sequence_controls_widget.isHidden()
         assert window.send_button.isEnabled()
     finally:
@@ -1019,7 +1028,7 @@ def test_direct_send_transmits_single_character_without_at_terminator_and_displa
         window.close()
 
 
-def test_manual_prompt_releases_queue_for_direct_payload(qt_app, monkeypatch):
+def test_manual_prompt_is_displayed_and_direct_payload_is_available(qt_app, monkeypatch):
     assert qt_app is QApplication.instance()
     monkeypatch.setattr(main_window_module, "load_config", lambda: DEFAULT_CONFIG.copy())
     monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
@@ -1033,17 +1042,18 @@ def test_manual_prompt_releases_queue_for_direct_payload(qt_app, monkeypatch):
         window._send_command()
         window.direct_send_check.setChecked(True)
         window.command_input.setPlainText("hello")
-        assert not window.send_button.isEnabled()
+        assert window.send_button.isEnabled()
 
         window._on_received(b"\r\n> ")
 
+        assert "RX ← > " in window.console.toPlainText()
         assert window.send_button.isEnabled()
         assert not window._command_queue.is_busy
         assert not window._command_timeout_timer.isActive()
         window._send_command()
         assert transmitted == [b"AT+CASEND=0,5,10000\r", b"hello"]
         window._on_received(b"\r\nOK\r\n")
-        assert window._command_queue.completed_count == 1
+        assert window._command_queue.completed_count == 0
     finally:
         window.close()
 
@@ -1377,8 +1387,9 @@ def test_last_error_finishes_sequence_without_locking_new_commands(qt_app, monke
     monkeypatch.setattr(window, "_write_queued_command", lambda command: None)
     try:
         window._is_connected = True
-        window.command_input.setPlainText("ATI")
+        window.command_input.setPlainText("AT\nATI")
         window._send_command()
+        window._process_rx_line(b"OK\r\n")
         window._process_rx_line(b"ERROR\r\n")
         assert not window._command_queue.paused
         assert window.send_button.isEnabled()
@@ -1527,14 +1538,19 @@ def test_connect_enters_connected_state_without_sending_commands(qt_app, monkeyp
     monkeypatch.setattr(
         main_window_module,
         "load_config",
-        lambda: {**DEFAULT_CONFIG, "initialize_at_on_connect": True},
+        lambda: {
+            **DEFAULT_CONFIG, "initialize_at_on_connect": True, "flow_control": "XON/XOFF",
+        },
     )
     monkeypatch.setattr(main_window_module, "save_config", lambda config: config.copy())
     window = MainWindow()
     sent: list[bytes] = []
     monkeypatch.setattr(window, "_write_queued_command", sent.append)
     try:
+        assert window.flow_combo.isEnabled()
+        assert window._serial_settings()["xonxoff"]
         window._on_connection_changed(True)
+        assert not window.flow_combo.isEnabled()
         assert sent == []
         assert not window.echo_check.isChecked()
         assert window.command_input.isEnabled()

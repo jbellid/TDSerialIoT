@@ -83,7 +83,7 @@ class SerialLineBuffer:
     def has_pending(self) -> bool:
         return bool(self._pending)
 
-    def feed(self, data: bytes) -> list[bytes]:
+    def feed(self, data: bytes, *, keep_empty: bool = False) -> list[bytes]:
         self._pending.extend(data)
         lines: list[bytes] = []
         offset = 0
@@ -91,7 +91,7 @@ class SerialLineBuffer:
             if match.group() == b"\r" and match.end() == len(self._pending):
                 break
             line = bytes(self._pending[offset : match.end()])
-            if line.strip(b"\r\n"):
+            if keep_empty or line.strip(b"\r\n"):
                 lines.append(line)
             offset = match.end()
 

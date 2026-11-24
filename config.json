@@ -1,10 +1,10 @@
 {
-  "port": "COM6",
-  "baudrate": 115200,
+  "port": "COM7",
+  "baudrate": 9600,
   "bytesize": 8,
   "parity": "N",
   "stopbits": 1.0,
-  "flow_control": "Ninguno",
+  "flow_control": "XON/XOFF",
   "clear_buffer_on_connect": false,
   "autoscroll": true,
   "display_format": "ASCII",

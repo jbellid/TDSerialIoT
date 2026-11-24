@@ -167,6 +167,23 @@ def test_port_is_configured_passively_before_explicit_open(worker):
     assert fake.writes == []
 
 
+def test_port_open_uses_selected_software_flow_control(worker):
+    instance, _, _, _, _, _ = worker
+    instance.open_port(
+        {
+            "port": "COM7",
+            "baudrate": 9600,
+            "bytesize": 8,
+            "parity": "N",
+            "stopbits": 1,
+            "xonxoff": True,
+        }
+    )
+    fake = FakeSerial.instances[-1]
+    assert fake.open_state == ("COM7", False, False, False, True, False, False)
+    assert fake.baudrate == 9600
+
+
 def test_rx_lines_are_not_joined_when_serial_reads_contain_multiple_responses():
     from tdserial_iot.serial_lines import SerialLineBuffer
 

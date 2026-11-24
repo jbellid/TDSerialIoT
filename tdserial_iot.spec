@@ -22,7 +22,7 @@ a = Analysis(
         'PySide6.QtSerialPort',
         'serial',
         'keyring',
-        'keyring.backends.windows',
+        'keyring.backends.Windows',
         'logging',
         'json',
     ],

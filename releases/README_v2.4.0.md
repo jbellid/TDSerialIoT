@@ -1,4 +1,20 @@
-# TdSerial IoT v2.3.1 - Ejecutable para Windows
+# TdSerial IoT v2.4.0
+
+Esta versión incorpora una plantilla Arduino para enviar telemetría de la LilyGO T-SIM7080G-S3 a 1NCE OS. TinyGSM gestiona el registro y la conexión de datos, y el SIM7080G envía el JSON por UDP mediante comandos AT.
+
+## Plantilla Arduino
+
+Descarga [TdSIM7080G_Plantilla_TinyGSM_1NCE.zip](../sketches/TdSIM7080G_Plantilla_TinyGSM_1NCE.zip). Necesitas Arduino IDE con soporte ESP32, TinyGSM, XPowersLib y una SIM 1NCE activa. La [guía de la plantilla](../README.md#plantilla-tinygsm-para-1nce) explica cómo configurar la placa, añadir lecturas de sensores y verificar la recepción en Historian.
+
+## Cambios en el monitor serie
+
+- Un envío manual de una sola línea usa la terminación seleccionada y permite continuar sin esperar una respuesta AT.
+- Los envíos de varias líneas mantienen la cola AT. Fuera de una operación AT, el monitor agrupa los fragmentos de texto recibidos.
+- La apertura del puerto aplica el control de flujo seleccionado.
+
+## Ejecutable para Windows
+
+Descomprime `TdSerialIoT.v2.4.0.zip` y ejecuta `TdSerialIoT.exe` desde la carpeta extraída. Conserva la carpeta `_internal` junto al ejecutable. El paquete incluye Python y las dependencias de la aplicación.
 
 ## Instalación
 
@@ -27,4 +43,4 @@ Para descartar la entrada disponible al conectar, marca **Limpiar buffer**. Los 
 
 Para más información sobre las características y el uso de la aplicación, consulta el [README del proyecto](../README.md).
 
-**Versión**: 2.3.1
+

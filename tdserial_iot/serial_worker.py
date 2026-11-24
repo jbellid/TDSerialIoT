@@ -45,10 +45,8 @@ class SerialWorker(QObject):
         if self._port is not None and self._port.is_open:
             self._close_port()
         port_name = settings["port"]
-        logger.info(
-            "Abriendo puerto serie %s; DTR=False RTS=False; flow control desactivado",
-            port_name,
-        )
+        flow = {key: bool(settings.get(key, False)) for key in ("xonxoff", "rtscts", "dsrdtr")}
+        logger.info("Abriendo puerto serie %s con control de flujo %s", port_name, flow)
         try:
             port = _create_serial(
                 port=None,
@@ -58,9 +56,7 @@ class SerialWorker(QObject):
                 stopbits=float(settings["stopbits"]),
                 timeout=0,
                 write_timeout=1,
-                xonxoff=False,
-                rtscts=False,
-                dsrdtr=False,
+                **flow,
             )
             port.dtr = False
             port.rts = False

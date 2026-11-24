@@ -399,6 +399,11 @@ class MainWindow(QMainWindow):
         self._rx_flush_timer.setSingleShot(True)
         self._rx_flush_timer.setInterval(100)
         self._rx_flush_timer.timeout.connect(self._flush_incomplete_rx_line)
+        self._monitor_line_buffer = SerialLineBuffer()
+        self._monitor_flush_timer = QTimer(self)
+        self._monitor_flush_timer.setSingleShot(True)
+        self._monitor_flush_timer.setInterval(self._rx_flush_timer.interval())
+        self._monitor_flush_timer.timeout.connect(self._flush_monitor_line)
         self._command_timeout_timer = QTimer(self)
         self._command_timeout_timer.setSingleShot(True)
         self._command_timeout_timer.setInterval(self.COMMAND_TIMEOUT_MS)
@@ -2615,11 +2620,6 @@ class MainWindow(QMainWindow):
             ["Ninguno", "XON/XOFF", "RTS/CTS", "DSR/DTR"],
             str(self._config["flow_control"]),
         )
-        self.flow_combo.setCurrentText("Ninguno")
-        self.flow_combo.setEnabled(False)
-        self.flow_combo.setToolTip(
-            "El control de flujo está desactivado para mantener la apertura serie pasiva."
-        )
         self.connect_button = QPushButton("Conectar")
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self._toggle_connection)
@@ -2708,6 +2708,9 @@ class MainWindow(QMainWindow):
         self.command_input = CommandTextEdit()
         self.command_input.setPlaceholderText(
             "Escribe un comando o pega varios (uno por línea). Enter envía; Shift+Enter añade una línea."
+        )
+        self.command_input.setToolTip(
+            "Una línea se envía sin esperar respuesta. Varias líneas se envían en secuencia."
         )
         self._adjust_command_input_height()
         self.command_input.send_requested.connect(self._send_command)
@@ -2871,6 +2874,7 @@ class MainWindow(QMainWindow):
         self._connecting = True
         self.connect_button.setEnabled(False)
         self.clear_buffer_check.setEnabled(False)
+        self.flow_combo.setEnabled(False)
         self.open_requested.emit(settings)
 
     def _on_connection_changed(self, connected: bool) -> None:
@@ -2901,6 +2905,7 @@ class MainWindow(QMainWindow):
             else:
                 self._carecv_frame_buffer.finish()
             self._flush_rx_buffer()
+            self._flush_monitor_line()
             if discarded:
                 self._add_event(
                     "SYSTEM",
@@ -2938,6 +2943,7 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(True)
         self.connect_button.setText("Desconectar" if connected else "Conectar")
         self.clear_buffer_check.setEnabled(not connected)
+        self.flow_combo.setEnabled(not connected)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self._add_event("SYSTEM", b"Puerto serie conectado" if connected else b"Puerto serie desconectado")
@@ -2977,8 +2983,23 @@ class MainWindow(QMainWindow):
             self._add_event("BUFFER", line)
 
     def _process_rx_stream(self, data: bytes) -> None:
+        if self._command_queue.active_spec is None:
+            for line in self._monitor_line_buffer.feed(data, keep_empty=True):
+                self._add_event("RX", line)
+            prompt = self._monitor_line_buffer.flush_prompt()
+            if prompt:
+                self._add_event("RX", prompt)
+            if self._monitor_line_buffer.has_pending:
+                self._monitor_flush_timer.start()
+            else:
+                self._monitor_flush_timer.stop()
+            return
+        self._flush_monitor_line()
         for line in self._rx_line_buffer.feed(data):
             self._process_rx_line(line)
+        if self._command_queue.active_spec is None:
+            self._flush_rx_buffer()
+            return
         prompt = self._rx_line_buffer.flush_prompt()
         if prompt:
             self._process_rx_line(prompt)
@@ -2992,7 +3013,14 @@ class MainWindow(QMainWindow):
         if line:
             self._process_rx_line(line)
 
+    def _flush_monitor_line(self) -> None:
+        self._monitor_flush_timer.stop()
+        line = self._monitor_line_buffer.flush()
+        if line:
+            self._add_event("RX", line)
+
     def _flush_rx_buffer(self) -> None:
+        self._rx_flush_timer.stop()
         line = self._rx_line_buffer.flush()
         if line:
             self._process_rx_line(line)
@@ -3000,7 +3028,9 @@ class MainWindow(QMainWindow):
     def _process_rx_line(self, line: bytes) -> None:
         self._add_event("RX", line)
         active = self._command_queue.active_spec
-        if active is not None and active.purpose is not None:
+        if active is None:
+            return
+        if active.purpose is not None:
             self._command_responses.setdefault(id(active), []).append(line)
         complete = line.endswith((b"\r", b"\n"))
         event = self._command_queue.accept_line(line, complete=complete)
@@ -3082,11 +3112,20 @@ class MainWindow(QMainWindow):
         if self._command_queue.paused:
             self._on_error("La secuencia está pausada. Reanúdala o cancélala antes de enviar más comandos.")
             return
+        if len(encoded_commands) == 1:
+            if self._command_queue.is_busy:
+                self._on_error(
+                    "El envío sin espera no puede intercalarse con una secuencia AT activa."
+                )
+                return
+            self.command_input.remember(commands)
+            self.write_requested.emit(encoded_commands[0])
+            self.command_input.clear()
+            return
         self.command_input.remember(commands)
         timeout_ms = self.command_timeout_spin.value() * 1000
         specs = [make_at_command(command, timeout_ms) for command in encoded_commands]
-        if len(specs) > 1:
-            self._manual_sequence_active = True
+        self._manual_sequence_active = True
         first_command = self._command_queue.enqueue(specs, priority=True)
         if first_command is not None:
             self._queue_status = "Enviando secuencia"
@@ -3129,6 +3168,7 @@ class MainWindow(QMainWindow):
         timed_out = self._command_queue.timeout()
         if timed_out is None:
             return
+        self._flush_rx_buffer()
         logger.warning(
             "Timeout esperando respuesta completa al comando %r",
             timed_out.data.rstrip(b"\r\n"),
@@ -3335,14 +3375,11 @@ class MainWindow(QMainWindow):
         self.terminator_combo.setEnabled(
             input_available and not self.direct_send_check.isChecked()
         )
+        sends_sequence = has_entered_sequence and not self.direct_send_check.isChecked()
         self.send_button.setEnabled(
             input_available
-            and (
-                not self._command_queue.paused
-                if not self.direct_send_check.isChecked()
-                else not self._command_queue.is_busy
-                and not self._command_queue.paused
-            )
+            and not self._command_queue.paused
+            and (sends_sequence or not self._command_queue.is_busy)
         )
         self.echo_check.setEnabled(
             input_available and not self._command_queue.paused
@@ -3840,6 +3877,8 @@ class MainWindow(QMainWindow):
                 self._append_line(self._format_record(direction, payload, timestamp), direction)
 
     def _clear_console(self) -> None:
+        self._monitor_flush_timer.stop()
+        self._monitor_line_buffer.clear()
         self.console.clear()
         self._records.clear()
         self._pending_render.clear()

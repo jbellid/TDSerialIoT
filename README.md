@@ -4,7 +4,13 @@ Aplicación de escritorio para Windows orientada al diagnóstico serie y al cont
 
 ## Versión Actual
 
-**v2.3.1** — Conexión serie directa, sin inicialización AT automática.
+**v2.4.0** — Plantilla Arduino con TinyGSM para enviar telemetría a 1NCE OS.
+
+### Cambios en v2.4.0
+
+- Nueva [plantilla TinyGSM para 1NCE](#plantilla-tinygsm-para-1nce) para conectar la LilyGO T-SIM7080G-S3 y enviar datos de sensores por UDP.
+- El monitor serie permite enviar una sola línea manual sin esperar una respuesta AT. Los envíos de varias líneas siguen usando la cola AT.
+- El puerto serie aplica el control de flujo seleccionado y el monitor agrupa los fragmentos entrantes al recibir texto fuera de una operación AT.
 
 ### Cambios en v2.3.1
 
@@ -68,7 +74,20 @@ El lanzador y el punto de entrada Python configuran las rutas de plugins de Qt d
 
 ## 🔧 Sketches Arduino para LilyGO SIM7080G-S3
 
-La carpeta `sketches/` contiene dos paquetes Arduino para programar la placa de desarrollo **LilyGO SIM7080G-S3**:
+La carpeta `sketches/` contiene tres paquetes Arduino para programar la placa de desarrollo **LilyGO SIM7080G-S3**.
+
+### Plantilla TinyGSM para 1NCE
+
+Descarga y descomprime [TdSIM7080G_Plantilla_TinyGSM_1NCE.zip](sketches/TdSIM7080G_Plantilla_TinyGSM_1NCE.zip). Abre el archivo `TdSIM7080G_Plantilla_TinyGSM_1NCE.ino` desde su carpeta en Arduino IDE. Necesitas una LilyGO T-SIM7080G-S3 con PMU AXP2101, una SIM 1NCE activa, el soporte de placas ESP32 y las bibliotecas **TinyGSM** y **XPowersLib**.
+
+1. Conecta la placa por USB y selecciona **ESP32S3 Dev Module** y el puerto COM correspondiente.
+2. Activa **USB CDC On Boot** y selecciona **16 MB** de flash, el esquema **16M Flash (3MB APP/9.9MB FATFS)** y **OPI PSRAM**, según las indicaciones del sketch.
+3. Ajusta `DEVICE_ID` como identificador dentro del JSON y `CADA_ENVIO_MS` para cambiar el intervalo de 60 segundos. Inicializa los sensores en `setup()`, toma las lecturas en `pollingSistemas()` y añade los campos al JSON en `crearPayload()`. El ejemplo envía `id`, `seq`, `uptime` en segundos y `csq`.
+4. Carga el sketch y abre el Monitor Serie a **115200 baudios**. En **1NCE Cloud** de TdSerial IoT, consulta **Historian** para el dispositivo asociado a la SIM y comprueba que aparezca el JSON por UDP. Usa el identificador de Device Inspector para la consulta. El campo `id` del JSON lo elige el usuario.
+
+TinyGSM gestiona el registro y la conexión de datos con el APN `iot.1nce.net`. El sketch usa comandos AT específicos del SIM7080G para el socket UDP y el envío a `udp.os.1nce.com:4445`. La plantilla conserva un solo mensaje pendiente para reintentar el envío. El `OK` del módem indica aceptación local. Comprueba la recepción en Historian.
+
+Para probar órdenes remotas desde **1NCE Device Controller**, usa el [firmware bidireccional v0.6.2](#firmware-de-la-placa).
 
 ### ATBridge
 Sketch para comunicación directa con el módem SIM7080G. Permite:
@@ -89,7 +108,7 @@ Para usar estos sketches:
 1. Conectar la placa LilyGO SIM7080G-S3 por USB al ordenador
 2. Abrir **Arduino IDE**
 3. Seleccionar la placa: **ESP32-S3 Dev Module** (o similar, depende de la versión)
-4. Cargar el sketch correspondiente desde `sketches/`
+4. Descomprimir el ZIP correspondiente de `sketches/`, abrir el archivo `.ino` y cargarlo en la placa
 5. Abrir el **Monitor Serie** (115200 baudios) para ver los registros
 
 ## Ejecución y uso
@@ -108,13 +127,15 @@ TdSerialIoT.exe
 
 La configuración inicial es COM6, 115200 baudios, 8 bits, sin paridad, 1 bit de parada y sin control de flujo. Si el puerto no está disponible, actualiza la lista o escribe el puerto en el selector. El monitor presenta TX a partir del número de bytes que `pyserial` confirma haber escrito y RX a partir de los bytes leídos desde el puerto. Las respuestas AT de texto se separan por CR/LF, incluso cuando llegan fragmentadas; el payload de CARECV se extrae por su longitud declarada y conserva los bytes de control. Si el módem devuelve el eco del comando, este aparece como RX porque son bytes recibidos realmente; no se elimina ni se clasifica por comparar el texto con el último TX.
 
-La conexión serie usa apertura explícita de pyserial: crea el objeto sin abrir, solicita DTR=False, RTS=False y BREAK=False, desactiva XON/XOFF, RTS/CTS y DSR/DTR, y después abre el puerto. El log técnico registra los estados solicitados y consultados antes y después de abrir, además de las operaciones de apertura/cierre. Aun así, Windows o el controlador USB pueden cambiar brevemente las líneas durante la apertura física; la aplicación no puede garantizar que el dispositivo no observe ese transitorio.
+La aplicación prepara el puerto con el control de flujo seleccionado y solicita DTR=False, RTS=False y BREAK=False antes de abrirlo. El log técnico registra los estados de las líneas y las operaciones de apertura y cierre. Windows o el controlador USB pueden cambiar brevemente las líneas durante la apertura física.
 
 Al conectar, los bytes disponibles inmediatamente después de la apertura se muestran como **BUFFER**; los que llegan posteriormente aparecen como **RX**. La casilla **Limpiar buffer** descarta los bytes de entrada disponibles al conectar en vez de mostrarlos; su estado se guarda en `config.json`. En Windows se evita el vaciado automático que hace pySerial al abrir para conservar lo que el controlador tenga disponible. La recuperación de comunicaciones enviadas antes de conectar depende del dispositivo y del controlador: no está garantizada si estos las descartaron o si su buffer se llenó. La marca **BUFFER** indica cuándo se leyeron los bytes, no cuándo se transmitieron.
 
 Al conectar, el estado indica **Puerto conectado**. La aplicación inicia la recepción, pero no envía comandos AT ni ejecuta `ATE0` automáticamente; los comandos manuales quedan disponibles inmediatamente. El diagnóstico y la monitorización automática solo envían consultas cuando se solicitan explícitamente. Las configuraciones existentes que contengan la antigua preferencia de inicialización AT se ignoran.
 
-El campo de comandos acepta varias líneas pegadas: cada línea no vacía es un comando independiente. La cola transmite solo uno a la vez y espera líneas completas `OK`, `ERROR`, `+CME ERROR` o `+CMS ERROR`; los ecos, respuestas parciales y URC intercalados no la adelantan. También considera un prompt aislado `>` como respuesta válida y completa el comando sin esperar `OK`: si hay comandos pendientes, transmite el siguiente inmediatamente. El usuario es responsable de completar la interacción del receptor, controlar el número de bytes y evitar que una secuencia pendiente se interprete como datos; las respuestas posteriores se muestran en RX y pueden afectar al comando que esté activo en ese momento. `AT+CAOPEN` requiere tanto `OK` como el URC `+CAOPEN` del mismo identificador de conexión, en cualquier orden, salvo que se reciba `>`. El timeout por comando se configura en segundos (1–600, predeterminado 10). Si vence, la secuencia se pausa y exige **Reanudar** para continuar; una respuesta tardía no libera la cola pausada. **Al encontrar error** permite elegir **Detener** (predeterminado), **Continuar** o **Preguntar**. El monitor indica el comando actual y los contadores de comandos ejecutados, pendientes, completados y fallidos. **Cancelar secuencia** descarta los comandos pendientes, pero deja terminar la operación actual; no se cierra ni se interrumpe el puerto serie. La interacción automática prompt/payload de `AT+CASEND` está disponible en la pestaña Comunicaciones IoT y sigue esperando el resultado final del módem. Enter envía el contenido; Shift+Enter inserta una línea al editar manualmente. El contador indica los bytes totales y el número de comandos. Las flechas arriba/abajo recorren el historial. Para transmitir un carácter o texto sin tratarlo como un comando AT, activa **Enviar texto/caracteres sin terminación**: se envían exactamente los bytes UTF-8 escritos, sin CR/LF y sin esperar una respuesta terminal; no puede intercalarse con una secuencia AT activa. El TX aparece cuando el puerto confirma los bytes escritos y las respuestas recibidas continúan mostrándose como RX. La casilla **Activar/desactivar eco** envía `ATE1` al marcarse y `ATE0` al desmarcarse, usando la misma cola serie. El monitor permite pausar solo la visualización (la recepción continúa), autoscroll, limpiar, copiar, guardar y cambiar entre ASCII y HEX. La casilla **Mostrar caracteres especiales y tamaño (bytes)** está desmarcada por defecto: desmarcada, omite los bytes de control/no ASCII y el contador de tamaño del monitor; marcada, muestra los controles como símbolos visibles (por ejemplo, CR como `␍`, LF como `␊`) y añade el tamaño TX/RX en bytes. Al alternarla, el monitor se regenera con la vista elegida, incluidos los registros anteriores. Las preferencias de timeout, política de error y parámetros de Comunicaciones IoT se guardan en `config.json`.
+Por defecto, un envío manual con una sola línea no vacía usa la terminación seleccionada y sale sin esperar respuesta. Cuando no hay una operación AT activa, el monitor reúne los fragmentos RX hasta el salto de línea y muestra el texto sin terminación tras una pausa breve. La vista HEX permite ver todos los bytes.
+
+Con dos o más líneas no vacías en un mismo envío manual, cada línea es un comando independiente. La cola transmite solo uno a la vez y espera líneas completas `OK`, `ERROR`, `+CME ERROR` o `+CMS ERROR`; los ecos, respuestas parciales y URC intercalados no la adelantan. También considera un prompt aislado `>` como respuesta válida y completa el comando sin esperar `OK`: si hay comandos pendientes, transmite el siguiente inmediatamente. El usuario es responsable de completar la interacción del receptor, controlar el número de bytes y evitar que una secuencia pendiente se interprete como datos; las respuestas posteriores se muestran en RX y pueden afectar al comando que esté activo en ese momento. `AT+CAOPEN` requiere tanto `OK` como el URC `+CAOPEN` del mismo identificador de conexión, en cualquier orden, salvo que se reciba `>`. El timeout por comando se configura en segundos (1–600, predeterminado 10). Si vence, la secuencia se pausa y exige **Reanudar** para continuar; una respuesta tardía no libera la cola pausada. **Al encontrar error** permite elegir **Detener** (predeterminado), **Continuar** o **Preguntar**. El monitor indica el comando actual y los contadores de comandos ejecutados, pendientes, completados y fallidos. **Cancelar secuencia** descarta los comandos pendientes, pero deja terminar la operación actual; no se cierra ni se interrumpe el puerto serie. La interacción automática prompt/payload de `AT+CASEND` está disponible en la pestaña Comunicaciones IoT y sigue esperando el resultado final del módem. Enter envía el contenido; Shift+Enter inserta una línea al editar manualmente. El contador indica los bytes totales y el número de comandos. Las flechas arriba/abajo recorren el historial. Para transmitir un carácter o texto sin tratarlo como un comando AT, activa **Enviar texto/caracteres sin terminación**: se envían exactamente los bytes UTF-8 escritos, sin CR/LF y sin esperar una respuesta terminal; no puede intercalarse con una secuencia AT activa. El TX aparece cuando el puerto confirma los bytes escritos y las respuestas recibidas continúan mostrándose como RX. La casilla **Activar/desactivar eco** envía `ATE1` al marcarse y `ATE0` al desmarcarse, usando la misma cola serie. El monitor permite pausar solo la visualización (la recepción continúa), autoscroll, limpiar, copiar, guardar y cambiar entre ASCII y HEX. La casilla **Mostrar caracteres especiales y tamaño (bytes)** está desmarcada por defecto: desmarcada, omite los bytes de control/no ASCII y el contador de tamaño del monitor; marcada, muestra los controles como símbolos visibles (por ejemplo, CR como `␍`, LF como `␊`) y añade el tamaño TX/RX en bytes. Al alternarla, el monitor se regenera con la vista elegida, incluidos los registros anteriores. Las preferencias de timeout, política de error y parámetros de Comunicaciones IoT se guardan en `config.json`.
 
 Los parámetros convencionales se pasan al controlador serie tal como se seleccionan. Algunos puertos USB Serial/JTAG pueden no admitir o reflejar todos los ajustes; la aplicación informa de errores sin intentar modificar parámetros del módem. Las comunicaciones serie se realizan desde un único hilo de trabajo para no bloquear la interfaz.
 
